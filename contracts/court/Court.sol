@@ -26,16 +26,17 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
     using Uint256Helpers for uint256;
 
     // Configs-related error messages
-    string private constant ERROR_INVALID_PENALTY_PCT = "CT_INVALID_PENALTY_PCT";
-    string private constant ERROR_INVALID_SENDER_ADDRESS = "CT_INVALID_SENDER_ADDRESS";
+    string private constant ERROR_SENDER_NOT_VOTING = "CT_SENDER_NOT_VOTING";
     string private constant ERROR_BAD_FIRST_TERM_START_TIME = "CT_BAD_FIRST_TERM_START_TIME";
-    string private constant ERROR_INVALID_MAX_APPEAL_ROUNDS = "CT_INVALID_MAX_APPEAL_ROUNDS";
     string private constant ERROR_CONFIG_PERIOD_ZERO_TERMS = "CT_CONFIG_PERIOD_0";
+    string private constant ERROR_INVALID_PENALTY_PCT = "CT_INVALID_PENALTY_PCT";
+    string private constant ERROR_INVALID_MAX_APPEAL_ROUNDS = "CT_INVALID_MAX_APPEAL_ROUNDS";
     string private constant ERROR_INVALID_PERIOD_DURATION = "CT_INVALID_PERIOD_DURATION";
     string private constant ERROR_INVALID_GOVERNANCE_SHARE = "CT_INVALID_GOVERNANCE_SHARE";
     string private constant ERROR_INVALID_LATE_PAYMENT_PENALTY = "CT_INVALID_LATE_PAYMENT_PENALTY";
 
     // Terms-related error messages
+    string private constant ERROR_TERM_OUTDATED = "CT_TERM_OUTDATED";
     string private constant ERROR_TOO_MANY_TRANSITIONS = "CT_TOO_MANY_TRANSITIONS";
     string private constant ERROR_INVALID_TRANSITION_TERMS = "CT_INVALID_TRANSITION_TERMS";
     string private constant ERROR_PAST_TERM_FEE_CHANGE = "CT_PAST_TERM_FEE_CHANGE";
@@ -52,16 +53,12 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
     string private constant ERROR_DEPOSIT_FAILED = "CT_DEPOSIT_FAILED";
 
     // Rounds-related error messages
+    string private constant ERROR_ROUND_IS_FINAL = "CT_ROUND_IS_FINAL";
     string private constant ERROR_ROUND_DOES_NOT_EXIST = "CT_ROUND_DOES_NOT_EXIST";
     string private constant ERROR_INVALID_ADJUDICATION_STATE = "CT_INVALID_ADJUDICATION_STATE";
     string private constant ERROR_ROUND_ALREADY_DRAFTED = "CT_ROUND_ALREADY_DRAFTED";
     string private constant ERROR_ROUND_NOT_DRAFT_TERM = "CT_ROUND_NOT_DRAFT_TERM";
-
-    // Appeals-related error messages
     string private constant ERROR_ROUND_NOT_APPEALED = "CT_ROUND_NOT_APPEALED";
-    string private constant ERROR_ROUND_ALREADY_APPEALED = "CT_ROUND_ALREADY_APPEALED";
-    string private constant ERROR_ROUND_APPEAL_ALREADY_CONFIRMED = "CT_APPEAL_ALREADY_CONFIRMED";
-    string private constant ERROR_SENDER_CANNOT_CONFIRM_APPEAL = "CT_SENDER_CANNOT_CONFIRM_APPEAL";
     string private constant ERROR_INVALID_APPEAL_RULING = "CT_INVALID_APPEAL_RULING";
 
     // Settlements-related error messages
@@ -76,7 +73,7 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
     // Initial term to start the Court, disputes are not allowed during this term. It can be used to active jurors
     uint64 internal constant ZERO_TERM_ID = 0;
 
-    // Maximum number of terms a callee may have to assume in order to call certain functions that require the Court being up-to-date
+    // Maximum number of term transitions a callee may have to assume in order to call certain functions that require the Court being up-to-date
     uint64 internal constant MAX_AUTO_TERM_TRANSITIONS_ALLOWED = 1;
 
     // Minimum possible rulings for a dispute
@@ -127,7 +124,7 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
         uint64 revealTerms;         // revealing period duration in terms
         uint64 appealTerms;         // appealing period duration in terms
         uint64 appealConfirmTerms;  // confirmation appeal period duration in terms
-        uint16 penaltyPct;          // percentage that will be used to compute the tokens to be locked for a juror on a draft
+        uint16 penaltyPct;          // per ten thousand that will be used to compute the tokens to be locked for a juror on a draft
         uint16 finalRoundReduction; // ‱ of reduction applied for final appeal round (1/10,000)
         uint64 appealStepFactor;    // factor in which the jurors number is increased on each appeal
         uint32 maxRegularAppealRounds; // before the final appeal
@@ -135,7 +132,7 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
 
     struct Term {
         uint64 startTime;           // Timestamp when the term started
-        uint64 dependingDrafts;     // Disputes or appeals pegged to this term for randomness
+        uint64 dependingDrafts;     // Adjudication rounds pegged to this term for randomness
         uint64 courtConfigId;       // Fee structure for this term (index in courtConfigs array)
         uint64 randomnessBN;        // Block number for entropy
         bytes32 randomness;         // Entropy from randomnessBN block hash
@@ -153,6 +150,7 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
         uint64 draftTermId;         // Term from which the jurors of a round can be drafted
         uint64 jurorsNumber;        // Number of jurors drafted for a round
         address triggeredBy;        // Address that triggered a round
+        bool settledPenalties;      // Whether or not penalties have been settled for a round
         uint256 jurorFees;          // Total amount of fees to be distributed between the winning jurors of a round
         address[] jurors;           // List of jurors drafted for a round
         mapping (address => JurorState) jurorsStates; // List of states for each drafted juror indexed by address
@@ -161,7 +159,6 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
         uint64 coherentJurors;      // Number of drafted jurors that voted in favor of the dispute final ruling
         uint64 settledJurors;       // Number of jurors whose rewards were already settled
         uint256 collectedTokens;    // Total amount of tokens collected from losing jurors
-        bool settledPenalties;      // Whether or not penalties have been settled for a round
         Appeal appeal;              // Appeal-related information of a round
     }
 
@@ -227,7 +224,7 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
     * @dev Ensure the msg.sender is the CR Voting module
     */
     modifier onlyVoting() {
-        require(msg.sender == address(voting), ERROR_INVALID_SENDER_ADDRESS);
+        require(msg.sender == address(voting), ERROR_SENDER_NOT_VOTING);
         _;
     }
 
@@ -303,8 +300,7 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
         uint32 _maxRegularAppealRounds,
         uint256[5] memory _subscriptionParams // _periodDuration, _feeAmount, _prePaymentPeriods, _latePaymentPenaltyPct, _governorSharePct
     ) public {
-        require(_firstTermStartTime >= _termDuration, ERROR_BAD_FIRST_TERM_START_TIME);
-        require(_firstTermStartTime >= getTimestamp64(), ERROR_BAD_FIRST_TERM_START_TIME);
+        require(_firstTermStartTime >= getTimestamp64() + _termDuration, ERROR_BAD_FIRST_TERM_START_TIME);
 
         termDuration = _termDuration;
         jurorsRegistry = _jurorsRegistry;
@@ -351,7 +347,7 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
         // TODO: Limit the max number of initial jurors
         // TODO: ERC165 check that _subject conforms to the Arbitrable interface
         // TODO: require(address(_subject) == msg.sender, ERROR_INVALID_DISPUTE_CREATOR);
-        require(termId > ZERO_TERM_ID, ERROR_CANNOT_CREATE_DISPUTE);
+        require(_draftTermId > termId, ERROR_CANNOT_CREATE_DISPUTE);
         require(subscriptions.isUpToDate(address(_subject)), ERROR_SUBSCRIPTION_NOT_PAID);
         require(_possibleRulings >= MIN_RULING_OPTIONS && _possibleRulings <= MAX_RULING_OPTIONS, ERROR_INVALID_RULING_OPTIONS);
 
@@ -376,32 +372,41 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
      * @param _disputeId Identification number of the dispute to be drafted
      * @param _maxJurorsToBeDrafted Max number of jurors to be drafted, it will be capped to the requested number of jurors of the dispute
      */
-    function draft(uint256 _disputeId, uint64 _maxJurorsToBeDrafted) external disputeExists(_disputeId) ensureTerm {
+    function draft(uint256 _disputeId, uint64 _maxJurorsToBeDrafted) external disputeExists(_disputeId) {
+        // Drafts can only be computed when the Court is up-to-date. Note that forcing a term transition won't work since the term randomness
+        // is always based on the next term which means it won't be available anyway.
+        uint64 requiredTransitions = _neededTermTransitions();
+        require(uint256(requiredTransitions) == 0, ERROR_TERM_OUTDATED);
+
         // Ensure dispute has not been drafted yet
         Dispute storage dispute = disputes[_disputeId];
         require(dispute.state == DisputeState.PreDraft, ERROR_ROUND_ALREADY_DRAFTED);
 
         // Ensure round can be drafted in the current term
         AdjudicationRound storage round = dispute.rounds[dispute.rounds.length - 1];
-        require(round.draftTermId <= termId, ERROR_ROUND_NOT_DRAFT_TERM);
+        uint64 requestedDraftTermId = round.draftTermId;
+        uint64 currentTermId = termId;
+        require(requestedDraftTermId <= currentTermId, ERROR_ROUND_NOT_DRAFT_TERM);
 
         // Ensure current term randomness can be ensured for the current block number
-        Term storage draftTerm = terms[termId];
+        Term storage draftTerm = terms[currentTermId];
         _ensureTermRandomness(draftTerm);
 
         // Draft the min number of jurors between the one requested by the sender and the one requested by the disputer
         uint64 jurorsNumber = round.jurorsNumber;
-        uint256 jurorsRequested = jurorsNumber < _maxJurorsToBeDrafted ? jurorsNumber : _maxJurorsToBeDrafted;
+        uint64 selectedJurors = round.selectedJurors;
+        uint64 jurorsToBeDrafted = jurorsNumber - selectedJurors;
+        uint256 requestedJurors = uint256(jurorsToBeDrafted < _maxJurorsToBeDrafted ? jurorsToBeDrafted : _maxJurorsToBeDrafted);
 
         // Draft jurors for the given dispute and reimburse fees
         CourtConfig storage config = _getConfigAtDraftTerm(round);
-        _draft(jurorsRequested, _disputeId, round, draftTerm, config);
-        accounting.assign(config.feeToken, msg.sender, config.draftFee * jurorsRequested);
+        _draft(_disputeId, round, jurorsNumber, requestedJurors, draftTerm, config);
+        accounting.assign(config.feeToken, msg.sender, config.draftFee * requestedJurors);
 
         // If the drafting is over, update its state
-        if (round.selectedJurors == round.jurorsNumber) {
+        if (round.selectedJurors == jurorsNumber) {
             // Note that we can avoid using SafeMath here since we already ensured `termId` is greater than or equal to `round.draftTermId`
-            round.delayedTerms = termId - round.draftTermId;
+            round.delayedTerms = currentTermId - requestedDraftTermId;
             dispute.state = DisputeState.Adjudicating;
             emit DisputeStateChanged(_disputeId, dispute.state);
         }
@@ -413,15 +418,10 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
     * @param _roundId Identification number of the dispute round being appealed
     * @param _ruling Ruling appealing a dispute round in favor of
     */
-    function createAppeal(uint256 _disputeId, uint256 _roundId, uint8 _ruling) external ensureTerm {
-        // TODO: ensure round exists
+    function createAppeal(uint256 _disputeId, uint256 _roundId, uint8 _ruling) external disputeExists(_disputeId) ensureTerm {
         // Ensure given round can be appealed. Note that if there was a final appeal the adjudication state will be 'Ended'.
         Dispute storage dispute = disputes[_disputeId];
-        _ensureAdjudicationState(dispute, _roundId, AdjudicationState.Appealing);
-
-        // Ensure given round was not appealed yet
-        AdjudicationRound storage round = dispute.rounds[_roundId];
-        require(!_isRoundAppealed(round), ERROR_ROUND_ALREADY_APPEALED);
+        _checkAdjudicationState(dispute, _roundId, AdjudicationState.Appealing);
 
         // Ensure that the ruling being appealed in favor of is valid and different from the current winning ruling
         uint256 voteId = _getVoteId(_disputeId, _roundId);
@@ -429,8 +429,10 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
         require(roundWinningRuling != _ruling && voting.isValidOutcome(voteId, _ruling), ERROR_INVALID_APPEAL_RULING);
 
         // Update round appeal state
-        round.appeal.maker = msg.sender;
-        round.appeal.appealedRuling = _ruling;
+        AdjudicationRound storage round = dispute.rounds[_roundId];
+        Appeal storage appeal = round.appeal;
+        appeal.maker = msg.sender;
+        appeal.appealedRuling = _ruling;
         emit RulingAppealed(_disputeId, _roundId, _ruling);
 
         // Pay appeal deposit
@@ -445,20 +447,16 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
     * @param _ruling Ruling being confirmed against a dispute round appeal
     */
     function confirmAppeal(uint256 _disputeId, uint256 _roundId, uint8 _ruling) external ensureTerm {
-        // TODO: ensure round exists
+        // TODO: ensure dispute exists
         // Ensure given round is appealed and can be confirmed. Note that if there was a final appeal the adjudication state will be 'Ended'.
         Dispute storage dispute = disputes[_disputeId];
-        _ensureAdjudicationState(dispute, _roundId, AdjudicationState.ConfirmingAppeal);
-
-        // Ensure given round appeal was not confirmed yet
-        AdjudicationRound storage round = dispute.rounds[_roundId];
-        require(_isRoundAppealed(round), ERROR_ROUND_NOT_APPEALED);
-        require(round.appeal.maker != msg.sender, ERROR_SENDER_CANNOT_CONFIRM_APPEAL);
-        require(!_isRoundAppealConfirmed(round), ERROR_ROUND_APPEAL_ALREADY_CONFIRMED);
+        _checkAdjudicationState(dispute, _roundId, AdjudicationState.ConfirmingAppeal);
 
         // Ensure that the ruling being confirmed in favor of is valid and different from the appealed ruling
+        AdjudicationRound storage round = dispute.rounds[_roundId];
+        Appeal storage appeal = round.appeal;
         uint256 voteId = _getVoteId(_disputeId, _roundId);
-        require(round.appeal.appealedRuling != _ruling && voting.isValidOutcome(voteId, _ruling), ERROR_INVALID_APPEAL_RULING);
+        require(appeal.appealedRuling != _ruling && voting.isValidOutcome(voteId, _ruling), ERROR_INVALID_APPEAL_RULING);
 
         // Create a new adjudication round for the dispute
         (uint64 nextRoundStartTerm,
@@ -470,8 +468,8 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
         uint256 newRoundId = _createRound(_disputeId, newDisputeState, nextRoundStartTerm, nextRoundJurorsNumber, jurorFees);
 
         // Update previous round appeal state
-        round.appeal.taker = msg.sender;
-        round.appeal.opposedRuling = _ruling;
+        appeal.taker = msg.sender;
+        appeal.opposedRuling = _ruling;
         emit RulingAppealConfirmed(_disputeId, newRoundId, nextRoundStartTerm, nextRoundJurorsNumber);
 
         // Pay appeal confirm deposit
@@ -479,7 +477,7 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
     }
 
     /**
-    * @notice Execute the airbitrable associated to dispute #`_disputeId` based on its final ruling
+    * @notice Execute the arbitrable associated to dispute #`_disputeId` based on its final ruling
     * @param _disputeId Identification number of the dispute to be executed
     */
     function executeRuling(uint256 _disputeId) external disputeExists(_disputeId) ensureTerm {
@@ -524,7 +522,7 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
         }
 
         CourtConfig storage config = _getConfigAtDraftTerm(round);
-        if (_roundId < config.maxRegularAppealRounds) {
+        if (_isRegularRound(_roundId, config)) {
             // For regular appeal rounds we compute the amount of locked tokens that needs to get burned in batches.
             // The callers of this function will get rewarded in this case.
             uint256 jurorsSettled = _settleRegularRoundPenalties(round, voteId, finalRuling, config.penaltyPct, _jurorsToSettle);
@@ -572,7 +570,7 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
         // Ensure given juror was not rewarded yet and was drafted for the given round
         JurorState storage jurorState = round.jurorsStates[_juror];
         require(!jurorState.rewarded, ERROR_JUROR_ALREADY_REWARDED);
-        require(jurorState.weight > uint256(0), ERROR_WONT_REWARD_NON_VOTER_JUROR);
+        require(uint256(jurorState.weight) > 0, ERROR_WONT_REWARD_NON_VOTER_JUROR);
         jurorState.rewarded = true;
 
         // Check if the given juror has voted in favor of the final ruling of the dispute in this round
@@ -583,7 +581,7 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
         // we are penalizing jurors that refused intentionally their vote for the final round.
         uint256 coherentJurors = round.coherentJurors;
         uint256 collectedTokens = round.collectedTokens;
-        if (collectedTokens > uint256(0)) {
+        if (collectedTokens > 0) {
             jurorsRegistry.assignTokens(_juror, jurorState.weight * collectedTokens / coherentJurors);
         }
 
@@ -608,15 +606,15 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
 
         // Ensure given round was appealed and has not been settled yet
         Appeal storage appeal = round.appeal;
-        require(_isRoundAppealed(round), ERROR_ROUND_NOT_APPEALED);
+        require(_existsAppeal(appeal), ERROR_ROUND_NOT_APPEALED);
         require(!appeal.settled, ERROR_ROUND_APPEAL_ALREADY_SETTLED);
         appeal.settled = true;
         emit AppealDepositSettled(_disputeId, _roundId);
 
         // If the appeal wasn't confirmed, return the entire deposit to appeal maker
-        (,,,ERC20 depositToken, uint256 totalFees,, uint256 appealDeposit, uint256 confirmAppealDeposit) = _getNextRoundDetails(round, _roundId);
-        if (!_isRoundAppealConfirmed(round)) {
-            accounting.assign(depositToken, appeal.maker, appealDeposit);
+        (,,,ERC20 feeToken, uint256 totalFees,, uint256 appealDeposit, uint256 confirmAppealDeposit) = _getNextRoundDetails(round, _roundId);
+        if (!_isAppealConfirmed(appeal)) {
+            accounting.assign(feeToken, appeal.maker, appealDeposit);
             return;
         }
 
@@ -625,14 +623,14 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
         uint8 finalRuling = dispute.finalRuling;
         uint256 totalDeposit = appealDeposit + confirmAppealDeposit;
         if (appeal.appealedRuling == finalRuling) {
-            accounting.assign(depositToken, appeal.maker, totalDeposit - totalFees);
+            accounting.assign(feeToken, appeal.maker, totalDeposit - totalFees);
         } else if (appeal.opposedRuling == finalRuling) {
-            accounting.assign(depositToken, appeal.taker, totalDeposit - totalFees);
+            accounting.assign(feeToken, appeal.taker, totalDeposit - totalFees);
         } else {
             // If the final ruling wasn't selected by any of the appealing parties or no jurors voted in the
             // final round, return their deposits minus half of the fees to each party
-            accounting.assign(depositToken, appeal.maker, appealDeposit - totalFees / 2);
-            accounting.assign(depositToken, appeal.taker, confirmAppealDeposit - totalFees / 2);
+            accounting.assign(feeToken, appeal.maker, appealDeposit - totalFees / 2);
+            accounting.assign(feeToken, appeal.taker, confirmAppealDeposit - totalFees / 2);
         }
     }
 
@@ -642,10 +640,10 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
     * @param _voter Address of the voter querying the weight of
     * @return Weight of the requested juror for the requested dispute's round
     */
-    function getVoterWeightToCommit(uint256 _voteId, address _voter) external ensureTerm onlyVoting returns (uint64) {
+    function getVoterWeightToCommit(uint256 _voteId, address _voter) external onlyVoting ensureTerm returns (uint64) {
         (uint256 disputeId, uint256 roundId) = _decodeVoteId(_voteId);
         Dispute storage dispute = disputes[disputeId];
-        _ensureAdjudicationState(dispute, roundId, AdjudicationState.Committing);
+        _checkAdjudicationState(dispute, roundId, AdjudicationState.Committing);
         return _computeJurorWeight(dispute, roundId, _voter);
     }
 
@@ -655,10 +653,10 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
     * @param _voter Address of the voter querying the weight of
     * @return Weight of the requested juror for the requested dispute's round
     */
-    function getVoterWeightToReveal(uint256 _voteId, address _voter) external ensureTerm onlyVoting returns (uint64) {
+    function getVoterWeightToReveal(uint256 _voteId, address _voter) external onlyVoting ensureTerm returns (uint64) {
         (uint256 disputeId, uint256 roundId) = _decodeVoteId(_voteId);
         Dispute storage dispute = disputes[disputeId];
-        _ensureAdjudicationState(dispute, roundId, AdjudicationState.Revealing);
+        _checkAdjudicationState(dispute, roundId, AdjudicationState.Revealing);
         return _computeJurorWeight(dispute, roundId, _voter);
     }
 
@@ -679,11 +677,19 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
     }
 
     /**
-    * @dev Tell the current term identification number. Note that the current term may not be ensured yet.
+    * @dev Tell the current term identification number. Note that there may be pending term transitions.
     * @return Identification number of the current term
     */
     function getCurrentTermId() external view returns (uint64) {
         return _getCurrentTermId();
+    }
+
+    /**
+    * @dev Tell the number of terms the Court should transition to be up-to-date
+    * @return Number of terms the Court should transition to be up-to-date
+    */
+    function neededTermTransitions() external view returns (uint64) {
+        return _neededTermTransitions();
     }
 
     /**
@@ -732,7 +738,7 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
     * @return finalRuling The winning ruling in case the dispute is finished
     * @return lastRoundId Identification number of the last round created for the dispute
     */
-    function getDispute(uint256 _disputeId) external disputeExists(_disputeId) view
+    function getDispute(uint256 _disputeId) external view disputeExists(_disputeId)
         returns (IArbitrable subject, uint8 possibleRulings, DisputeState state, uint8 finalRuling, uint256 lastRoundId)
     {
         Dispute storage dispute = disputes[_disputeId];
@@ -759,7 +765,7 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
     * @return coherentJurors Number of jurors that voted in favor of the final ruling in the requested round
     * @return state Adjudication state of the requested round
     */
-    function getRound(uint256 _disputeId, uint256 _roundId) external roundExists(_disputeId, _roundId) view
+    function getRound(uint256 _disputeId, uint256 _roundId) external view roundExists(_disputeId, _roundId)
         returns (
             uint64 draftTerm,
             uint64 delayedTerms,
@@ -812,6 +818,53 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
     }
 
     /**
+    * @dev Tell the amount of token fees required to create a dispute
+    * @param _draftTermId Term id in which the dispute will be drafted
+    * @param _jurorsNumber Number of jurors to be drafted for the dispute
+    * @return feeToken ERC20 token used for the fees
+    * @return jurorFees Total amount of fees to be distributed between the winning jurors of a round
+    * @return totalFees Total amount of fees for a regular round at the given term
+    */
+    function getDisputeFees(uint64 _draftTermId, uint64 _jurorsNumber) external view
+        returns (ERC20 feeToken, uint256 jurorFees, uint256 totalFees)
+    {
+        require(_draftTermId > termId, ERROR_CANNOT_CREATE_DISPUTE);
+        return _getRegularRoundFees(_draftTermId, _jurorsNumber);
+    }
+
+    /**
+    * @dev Tell information related to the next round due to an appeal of a certain round given.
+    * @param _disputeId Identification number of the dispute being queried
+    * @param _roundId Identification number of the round requesting the appeal details of
+    * @return nextRoundStartTerm Term id from which the next round will start
+    * @return nextRoundJurorsNumber Jurors number for the next round
+    * @return newDisputeState New state for the dispute associated to the given round after the appeal
+    * @return feeToken ERC20 token used for the next round fees
+    * @return jurorFees Total amount of fees to be distributed between the winning jurors of the next round
+    * @return totalFees Total amount of fees for a regular round at the given term
+    * @return appealDeposit Amount to be deposit of fees for a regular round at the given term
+    * @return confirmAppealDeposit Total amount of fees for a regular round at the given term
+    */
+    function getNextRoundDetails(uint256 _disputeId, uint256 _roundId) external view roundExists(_disputeId, _roundId)
+        returns (
+            uint64 nextRoundStartTerm,
+            uint64 nextRoundJurorsNumber,
+            DisputeState newDisputeState,
+            ERC20 feeToken,
+            uint256 totalFees,
+            uint256 jurorFees,
+            uint256 appealDeposit,
+            uint256 confirmAppealDeposit
+        )
+    {
+        Dispute storage dispute = disputes[_disputeId];
+        AdjudicationRound storage round = dispute.rounds[_roundId];
+        CourtConfig storage config = _getConfigAtDraftTerm(round);
+        require(_isRegularRound(_roundId, config), ERROR_ROUND_IS_FINAL);
+        return _getNextRoundDetails(round, _roundId);
+    }
+
+    /**
     * @dev Tell juror-related information of a certain adjudication round
     * @param _disputeId Identification number of the dispute being queried
     * @param _roundId Identification number of the round being queried
@@ -819,7 +872,7 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
     * @return weight Juror weight drafted for the requested round
     * @return rewarded Whether or not the given juror was rewarded based on the requested round
     */
-    function getJuror(uint256 _disputeId, uint256 _roundId, address _juror) external roundExists(_disputeId, _roundId) view
+    function getJuror(uint256 _disputeId, uint256 _roundId, address _juror) external view roundExists(_disputeId, _roundId)
         returns (uint64 weight, bool rewarded)
     {
         weight = _getJurorWeight(_disputeId, _roundId, _juror);
@@ -831,9 +884,9 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
     * @param _maxRequestedTransitions Max number of term transitions allowed by the sender
     */
     function heartbeat(uint64 _maxRequestedTransitions) public {
-        uint64 neededTransitions = neededTermTransitions();
+        uint64 neededTransitions = _neededTermTransitions();
         uint256 transitions = uint256(_maxRequestedTransitions < neededTransitions ? _maxRequestedTransitions : neededTransitions);
-        require(transitions > uint256(0), ERROR_INVALID_TRANSITION_TERMS);
+        require(transitions > 0, ERROR_INVALID_TRANSITION_TERMS);
 
         // Transition the minimum number of terms between the amount requested and the amount actually needed
         uint256 totalFee;
@@ -843,7 +896,8 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
             // even if we chose the minimum duration possible for a term (1 second), we can ensure terms will never reach 2^64 since time is
             // already assumed to fit in uint64.
             Term storage previousTerm = terms[termId++];
-            Term storage currentTerm = terms[termId];
+            uint64 currentTermId = termId;
+            Term storage currentTerm = terms[currentTermId];
 
             // TODO: allow config to be changed for a future term id
             currentTerm.courtConfigId = previousTerm.courtConfigId;
@@ -853,33 +907,17 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
             // In order to draft a random number of jurors in a term, we use a randomness factor for each term based on a
             // block number that is set once the term has started. Note that this information could not be known beforehand.
             currentTerm.randomnessBN = getBlockNumber64() + 1;
-            emit NewTerm(termId, msg.sender);
+            emit NewTerm(currentTermId, msg.sender);
 
             // Add amount of fees to be paid for the transitioned term
-            config = _getConfigSafeAt(currentTerm.courtConfigId);
+            config = _getConfigSafeAt(currentTermId);
             totalFee = totalFee.add(config.heartbeatFee.mul(uint256(currentTerm.dependingDrafts)));
         }
 
         // Pay heartbeat fees to the caller of this function
-        if (totalFee > uint256(0)) {
+        if (totalFee > 0) {
             accounting.assign(config.feeToken, msg.sender, totalFee);
         }
-    }
-
-    /**
-    * @dev Tells the number of terms the Court should transition to be up-to-date
-    * @return Number of terms the Court should transition to be up-to-date
-    */
-    function neededTermTransitions() public view returns (uint64) {
-        // Note that the Court is always initialized at least for the current initialization time or more likely a
-        // in the future. If that the case, no term transitions are needed.
-        uint64 currentTermStartTime = terms[termId].startTime;
-        if (getTimestamp64() < currentTermStartTime) {
-            return uint64(0);
-        }
-
-        // We already know that the start time of the current term is in the past, we are safe to avoid SafeMath here
-        return (getTimestamp64() - currentTermStartTime) / termDuration;
     }
 
     /**
@@ -887,10 +925,10 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
     *      only allows updating the Court by one term, if more terms are required, users will have to call the heartbeat function manually.
     */
     function _ensureTerm() internal {
-        uint64 requiredTransitions = neededTermTransitions();
+        uint64 requiredTransitions = _neededTermTransitions();
         require(requiredTransitions <= MAX_AUTO_TERM_TRANSITIONS_ALLOWED, ERROR_TOO_MANY_TRANSITIONS);
 
-        if (requiredTransitions > uint256(0)) {
+        if (uint256(requiredTransitions) > 0) {
             heartbeat(requiredTransitions);
         }
     }
@@ -950,20 +988,21 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
     function _ensureFinalRuling(uint256 _disputeId) internal returns (uint8) {
         // Check if there was a final ruling already cached
         Dispute storage dispute = disputes[_disputeId];
-        if (dispute.finalRuling > 0) {
+        if (uint256(dispute.finalRuling) > 0) {
             return dispute.finalRuling;
         }
 
         // Ensure the last adjudication round has ended. Note that there will always be at least one round.
         uint256 lastRoundId = dispute.rounds.length - 1;
-        _ensureAdjudicationState(dispute, lastRoundId, AdjudicationState.Ended);
+        _checkAdjudicationState(dispute, lastRoundId, AdjudicationState.Ended);
 
         // If the last adjudication round was appealed but no-one confirmed it, the final ruling is the outcome the
         // appealer vouched for. Otherwise, fetch the winning outcome from the voting app of the last round.
         AdjudicationRound storage lastRound = dispute.rounds[lastRoundId];
-        bool isRoundAppealedAndNotConfirmed = _isRoundAppealed(lastRound) && !_isRoundAppealConfirmed(lastRound);
+        Appeal storage lastAppeal = lastRound.appeal;
+        bool isRoundAppealedAndNotConfirmed = _existsAppeal(lastAppeal) && !_isAppealConfirmed(lastAppeal);
         uint8 finalRuling = isRoundAppealedAndNotConfirmed
-            ? lastRound.appeal.appealedRuling
+            ? lastAppeal.appealedRuling
             : voting.getWinningOutcome(_getVoteId(_disputeId, lastRoundId));
 
         // Store the winning ruling as the final decision for the given dispute
@@ -977,7 +1016,7 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
     * @param _round Round to slash the non-winning jurors of
     * @param _voteId Identification number of the voting associated to the given round
     * @param _finalRuling Winning ruling of the dispute corresponding to the given round
-    * @param _penaltyPct Percentage of the minimum active balance of a juror to be slashed
+    * @param _penaltyPct Per ten thousand of the minimum active balance of a juror to be slashed
     * @param _jurorsToSettle Maximum number of jurors to be slashed in this call. It can be set to zero to slash all the losing jurors of the round.
     * @return Number of jurors slashed for the given round
     */
@@ -1000,7 +1039,7 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
         // If the requested amount of jurors is not zero and it is lower that the remaining number of jurors to be settled for the given round,
         // we cap the number of jurors that are going to be settled in this batch to the requested amount. If not, we know we have reached the
         // last batch and we are safe to mark round penalties as settled.
-        if (_jurorsToSettle > uint256(0) && batchSettledJurors > _jurorsToSettle) {
+        if (_jurorsToSettle > 0 && batchSettledJurors > _jurorsToSettle) {
             batchSettledJurors = _jurorsToSettle;
         } else {
             _round.settledPenalties = true;
@@ -1038,7 +1077,7 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
         AdjudicationRound storage round = _dispute.rounds[_roundId];
         CourtConfig storage config = _getConfigAtDraftTerm(round);
 
-        return (_roundId < config.maxRegularAppealRounds)
+        return _isRegularRound(_roundId, config)
             ? _getJurorWeightForRegularRound(round, _juror)
             : _computeJurorWeightForFinalRound(round, _juror);
     }
@@ -1099,18 +1138,16 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
     {
         // TODO: Require config changes happening at least X terms in the future
         // Where X is the amount of terms in the future a dispute can be scheduled to be drafted at
-
         require(configChangeTermId > termId || termId == ZERO_TERM_ID, ERROR_PAST_TERM_FEE_CHANGE);
-        // We make sure that when applying penalty pct to juror min stake it doesn't result in zero
-        uint256 minJurorsActiveBalance = jurorsRegistry.minJurorsActiveBalance();
-        require(minJurorsActiveBalance.pct(_penaltyPct) > uint256(0), ERROR_INVALID_PENALTY_PCT);
-        require(
-            _maxRegularAppealRounds > uint32(0) && _maxRegularAppealRounds <= MAX_REGULAR_APPEAL_ROUNDS_LIMIT,
-            ERROR_INVALID_MAX_APPEAL_ROUNDS
-        );
+
+        // Make sure the given penalty pct is not greater than 100%
+        require(PctHelpers.isValid(_penaltyPct), ERROR_INVALID_PENALTY_PCT);
+
+        // Make sure the max number of appeals allowed does not reach the limit
+        bool isMaxAppealRoundsValid = uint256(_maxRegularAppealRounds) > 0 && _maxRegularAppealRounds <= MAX_REGULAR_APPEAL_ROUNDS_LIMIT;
+        require(isMaxAppealRoundsValid, ERROR_INVALID_MAX_APPEAL_ROUNDS);
 
         // TODO: add reasonable limits for durations
-
         for (uint i = 0; i < _roundStateDurations.length; i++) {
             require(_roundStateDurations[i] > 0, ERROR_CONFIG_PERIOD_ZERO_TERMS);
         }
@@ -1148,9 +1185,25 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
     * @param _amount Amount of tokens to be transferred from the msg.sender to the Court accounting
     */
     function _depositSenderAmount(ERC20 _token, uint256 _amount) internal {
-        if (_amount > uint256(0)) {
+        if (_amount > 0) {
             require(_token.safeTransferFrom(msg.sender, address(accounting), _amount), ERROR_DEPOSIT_FAILED);
         }
+    }
+
+    /**
+    * @dev Internal function to tell the number of terms the Court should transition to be up-to-date
+    * @return Number of terms the Court should transition to be up-to-date
+    */
+    function _neededTermTransitions() internal view returns (uint64) {
+        // Note that the Court is always initialized providing a start time for the first-term in the future. If that's the case,
+        // no term transitions are required.
+        uint64 currentTermStartTime = terms[termId].startTime;
+        if (getTimestamp64() < currentTermStartTime) {
+            return uint64(0);
+        }
+
+        // We already know that the start time of the current term is in the past, we are safe to avoid SafeMath here
+        return (getTimestamp64() - currentTermStartTime) / termDuration;
     }
 
     /**
@@ -1164,7 +1217,7 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
         AdjudicationRound storage round = disputes[_disputeId].rounds[_roundId];
         CourtConfig storage config = _getConfigAtDraftTerm(round);
 
-        return (_roundId < config.maxRegularAppealRounds)
+        return (_isRegularRound(_roundId, config))
             ? _getJurorWeightForRegularRound(round, _juror)
             : _getJurorWeightForFinalRound(round, _juror);
     }
@@ -1200,11 +1253,13 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
 
         // Otherwise, return the times the active balance of the juror fits in the min active balance, multiplying
         // it by a round factor to ensure a better precision rounding.
+        // TODO: review, we are not using the final round discount here
         return (FINAL_ROUND_WEIGHT_PRECISION.mul(activeBalance) / minJurorsActiveBalance).toUint64();
     }
 
     /**
-    * @dev Tell information related to the next round due to an appeal of a certain round given. This function assumes given round can be appealed.
+    * @dev Internal function to tell information related to the next round due to an appeal of a certain round given. This function assumes
+    *      given round can be appealed and that the given round ID corresponds to the given round pointer.
     * @param _round Round requesting the appeal details of
     * @param _roundId Identification number of the round requesting the appeal details of
     * @return nextRoundStartTerm Term id from which the next round will start
@@ -1228,44 +1283,33 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
             uint256 confirmAppealDeposit
         )
     {
-        // Next round start term is current round end term, nevertheless it is final or regular
-        nextRoundStartTerm = _getRegularRoundEndTerm(_round);
+        CourtConfig storage config = _getConfigAtDraftTerm(_round);
+        // Court terms are assumed to always fit in uint64. Thus, the end term of a round is assumed to fit in uint64 too.
+        uint64 currentRoundAppealStartTerm = _round.draftTermId + _round.delayedTerms + config.commitTerms + config.revealTerms;
+        // Next round start term is current round end term
+        nextRoundStartTerm = currentRoundAppealStartTerm + config.appealTerms + config.appealConfirmTerms;
 
         // Compute next round settings depending on if it will be the final round or not
-        CourtConfig storage config = _getConfigAtDraftTerm(_round);
-        if (_roundId >= config.maxRegularAppealRounds - 1) {
+        if (_roundId >= uint256(config.maxRegularAppealRounds) - 1) {
             // If the next round is the final round, no draft is needed.
             newDisputeState = DisputeState.Adjudicating;
             // The number of jurors will be the number of times the minimum stake is hold in the registry,
             // multiplied by a precision factor to help with division rounding.
             nextRoundJurorsNumber = _getFinalRoundJurorsNumber(nextRoundStartTerm);
-            // Calculate fees for the final round
-            (feeToken, jurorFees, totalFees) = _getFinalRoundFees(nextRoundStartTerm, nextRoundJurorsNumber);
+            // Calculate fees for the final round using the appeal start term of the current round
+            (feeToken, jurorFees, totalFees) = _getFinalRoundFees(currentRoundAppealStartTerm, nextRoundJurorsNumber);
         } else {
             // For a new regular rounds we need to draft jurors
             newDisputeState = DisputeState.PreDraft;
             // The number of jurors will be the number of jurors of the current round multiplied by an appeal factor
             nextRoundJurorsNumber = _getNextRegularRoundJurorsNumber(_round, config);
-            // Calculate fees for the next regular round
-            (feeToken, jurorFees, totalFees) = _getRegularRoundFees(nextRoundStartTerm, nextRoundJurorsNumber);
+            // Calculate fees for the next regular round using the appeal start term of the current round
+            (feeToken, jurorFees, totalFees) = _getRegularRoundFees(currentRoundAppealStartTerm, nextRoundJurorsNumber);
         }
 
         // Calculate appeal collateral
         appealDeposit = totalFees * APPEAL_COLLATERAL_FACTOR;
         confirmAppealDeposit = totalFees * APPEAL_CONFIRMATION_COLLATERAL_FACTOR;
-    }
-
-    /**
-    * @dev Internal function to calculate the end term of a regular round. This function assumes the given round is regular.
-    * @param _round Regular round querying the end term of
-    * @return End term of the given regular round
-    */
-    function _getRegularRoundEndTerm(AdjudicationRound storage _round) internal view returns (uint64) {
-        CourtConfig storage config = _getConfigAtDraftTerm(_round);
-        // Court terms are assumed to always fit in uint64. Thus, the end term of a round is assumed to fit in uint64 too.
-        // For a regular round, its end term is at the end of its appeal confirmation term.
-        uint64 draftTerm = _round.draftTermId + _round.delayedTerms;
-        return draftTerm + config.commitTerms + config.revealTerms + config.appealTerms + config.appealConfirmTerms;
     }
 
     /**
@@ -1279,7 +1323,7 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
         // Jurors number are increased by a step factor on each appeal
         uint64 jurorsNumber = _round.jurorsNumber * _config.appealStepFactor;
         // Make sure it's odd to enforce avoiding a tie. Note that it can happen if any of the jurors don't vote anyway.
-        if (jurorsNumber % 2 == uint256(0)) {
+        if (uint256(jurorsNumber) % 2 == 0) {
             jurorsNumber++;
         }
         return jurorsNumber;
@@ -1292,12 +1336,12 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
     * @return Jurors number for final rounds for the given term
     */
     function _getFinalRoundJurorsNumber(uint64 _termId) internal view returns (uint64) {
-        // The registry guarantees its total active balance will never be grater than
+        // The registry guarantees its total active balance will never be greater than
         // `2^64 * minJurorsActiveBalance / FINAL_ROUND_WEIGHT_PRECISION`. Thus, the
         // jurors number for a final round will always fit in uint64
         uint256 totalActiveBalance = jurorsRegistry.totalActiveBalanceAt(_termId);
         uint256 minJurorsActiveBalance = jurorsRegistry.minJurorsActiveBalance();
-        return uint64(FINAL_ROUND_WEIGHT_PRECISION * totalActiveBalance / minJurorsActiveBalance);
+        return (FINAL_ROUND_WEIGHT_PRECISION.mul(totalActiveBalance) / minJurorsActiveBalance).toUint64();
     }
 
     /**
@@ -1316,9 +1360,8 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
         // For regular rounds the fees for each juror is constant and given by the config of the round
         jurorFees = uint256(_jurorsNumber).mul(config.jurorFee);
         // The total fees for regular rounds also considers the heartbeat, the number of drafts, and the number of settles
-        uint256 draftFees = uint256(_jurorsNumber).mul(config.draftFee);
-        uint256 settleFees = uint256(_jurorsNumber).mul(config.settleFee);
-        totalFees = config.heartbeatFee.add(jurorFees).add(draftFees).add(settleFees);
+        uint256 draftAndSettleFees = (config.draftFee.add(config.settleFee)).mul(uint256(_jurorsNumber));
+        totalFees = config.heartbeatFee.add(jurorFees).add(draftAndSettleFees);
     }
 
     /**
@@ -1336,70 +1379,84 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
         feeToken = config.feeToken;
         // For final rounds, the jurors number is computed as the number of times the registry's minimum active balance is held in the registry
         // itself, multiplied by a precision factor. To avoid requesting a huge amount of fees, a final round discount is applied for each juror.
-        jurorFees = (_jurorsNumber * config.jurorFee / FINAL_ROUND_WEIGHT_PRECISION).pct(config.finalRoundReduction);
+        jurorFees = (uint256(_jurorsNumber).mul(config.jurorFee) / FINAL_ROUND_WEIGHT_PRECISION).pct(config.finalRoundReduction);
         // The total fees for final rounds only considers the heartbeat, there is no draft and no extra settle fees considered
         totalFees = config.heartbeatFee.add(jurorFees);
     }
 
     /**
-    * @dev Internal function to ensure the adjudication state of a certain dispute round. This function assumes Court term is up-to-date.
+    * @dev Internal function to check the adjudication state of a certain dispute round. This function assumes Court term is up-to-date.
     * @param _dispute Dispute to be checked
     * @param _roundId Identification number of the dispute round to be checked
     * @param _state Expected adjudication state for the given dispute round
     */
-    function _ensureAdjudicationState(Dispute storage _dispute, uint256 _roundId, AdjudicationState _state) internal view {
+    function _checkAdjudicationState(Dispute storage _dispute, uint256 _roundId, AdjudicationState _state) internal view {
+        require(_roundId < _dispute.rounds.length, ERROR_ROUND_DOES_NOT_EXIST);
         require(_adjudicationStateAt(_dispute, _roundId, termId) == _state, ERROR_INVALID_ADJUDICATION_STATE);
     }
 
     /**
-    * @dev Internal function to tell adjudication state of a round at a certain term
+    * @dev Internal function to tell adjudication state of a round at a certain term. This function assumes the given round exists.
     * @param _dispute Dispute querying the adjudication round of
     * @param _roundId Identification number of the dispute round querying the adjudication round of
     * @param _termId Identification number of the dispute round querying the adjudication round of
     * @return Adjudication state of the requested dispute round for the given term
     */
     function _adjudicationStateAt(Dispute storage _dispute, uint256 _roundId, uint64 _termId) internal view returns (AdjudicationState) {
-        // TODO: move the max appeal rounds validation to a separate method
         AdjudicationRound storage round = _dispute.rounds[_roundId];
         CourtConfig storage config = _getConfigAtDraftTerm(round);
 
         // If the dispute is executed or the given round is not the last one, we consider it ended
-        if (_dispute.state == DisputeState.Executed || _roundId < _dispute.rounds.length - 1) {
+        uint256 numberOfRounds = _dispute.rounds.length;
+        if (_dispute.state == DisputeState.Executed || _roundId < numberOfRounds - 1) {
             return AdjudicationState.Ended;
         }
 
-        // If given term is before the actual term when the round was finally drafted, we consider it invalid
+        // If given term is before the actual term when the last round was finally drafted, then the last round adjudication state is invalid
         uint64 draftFinishedTermId = round.draftTermId + round.delayedTerms;
         if (_dispute.state == DisputeState.PreDraft || _termId < draftFinishedTermId) {
             return AdjudicationState.Invalid;
         }
 
-        // If given term is before the reveal start term, jurors are still allowed to commit votes
+        // If given term is before the reveal start term of the last round, then jurors are still allowed to commit votes for the last round
         uint64 revealStartTerm = draftFinishedTermId + config.commitTerms;
         if (_termId < revealStartTerm) {
             return AdjudicationState.Committing;
         }
 
-        // If given term is before the appeal start term, jurors are still allowed to reveal votes
+        // If given term is before the appeal start term of the last round, then jurors are still allowed to reveal votes for the last round
         uint64 appealStartTerm = revealStartTerm + config.revealTerms;
         if (_termId < appealStartTerm) {
             return AdjudicationState.Revealing;
         }
 
-        // TODO: solve max regular rounds by dispute rounds length
-        // If given term is before the appeal confirmation start term and the max number of appeal round hasn't been reached, round appeal cannot be confirmed yet
-        uint64 appealConfirmationStartTerm = appealStartTerm + config.appealTerms;
-        if (_termId < appealConfirmationStartTerm && _roundId < config.maxRegularAppealRounds) {
-            return AdjudicationState.Appealing;
+        // If the max number of appeals has been reached, then the last round is the final round and can be considered ended
+        bool maxAppealReached = numberOfRounds > uint256(config.maxRegularAppealRounds);
+        if (maxAppealReached) {
+            return AdjudicationState.Ended;
         }
 
-        // If given term is before the appeal confirmation end term and the max number of appeal round hasn't been reached, round appeal can still be confirmed
+        // If the last round was not appealed yet, check if the confirmation period has started or not
+        bool isLastRoundAppealed = _existsAppeal(round.appeal);
+        uint64 appealConfirmationStartTerm = appealStartTerm + config.appealTerms;
+        if (!isLastRoundAppealed) {
+            // If given term is before the appeal confirmation start term, then the last round can still be appealed. Otherwise, it is ended.
+            if (_termId < appealConfirmationStartTerm) {
+                return AdjudicationState.Appealing;
+            } else {
+                return AdjudicationState.Ended;
+            }
+        }
+
+        // If the last round was appealed and the given term is before the appeal confirmation end term, then the last round appeal can still be
+        // confirmed. Note that if the round being checked was already appealed and confirmed, it won't be the last round, thus it will be caught
+        // above by the first check and considered 'Ended'
         uint64 appealConfirmationEndTerm = appealConfirmationStartTerm + config.appealConfirmTerms;
-        if (_termId < appealConfirmationEndTerm && _roundId < config.maxRegularAppealRounds) {
+        if (_termId < appealConfirmationEndTerm) {
             return AdjudicationState.ConfirmingAppeal;
         }
 
-        // If non of the above conditions have been met, the given round is considered ended
+        // If non of the above conditions have been met, the last round is considered ended
         return AdjudicationState.Ended;
     }
 
@@ -1420,7 +1477,8 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
     */
     function _getConfigAt(uint64 _termId) internal view returns (CourtConfig storage) {
         // If the given term is lower or equal to the last ensured Court term, it is safe to use a past Court config
-        if (_termId <= termId) {
+        uint64 lastEnsuredTermId = termId;
+        if (_termId <= lastEnsuredTermId) {
             return _getConfigSafeAt(_termId);
         }
 
@@ -1430,7 +1488,7 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
         }
 
         // If no changes are scheduled, use the Court config of the last ensured term
-        return _getConfigSafeAt(termId);
+        return _getConfigSafeAt(lastEnsuredTermId);
     }
 
     /**
@@ -1449,7 +1507,7 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
     */
     function _getCurrentTermId() internal view returns (uint64) {
         // Court terms are assumed to always fit in uint64. Thus, some terms after the last ensured term is assumed to fit in uint64 too.
-        return termId + neededTermTransitions();
+        return termId + _neededTermTransitions();
     }
 
     /**
@@ -1466,21 +1524,31 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
     }
 
     /**
-    * @dev Internal function to check if a certain round has been appealed
-    * @param _round Round to be checked
-    * @return True if the given round was appealed, false otherwise
+    * @dev Internal function to tell whether a round is regular or final. This function assumes the given round exists.
+    * @param _roundId Identification number of the round to be checked
+    * @param _config Court config to use in order to check if the given round is regular or final
+    * @return True if the given round is regular, false in case its a final round
     */
-    function _isRoundAppealed(AdjudicationRound storage _round) internal view returns (bool) {
-        return _round.appeal.maker != address(0);
+    function _isRegularRound(uint256 _roundId, CourtConfig storage _config) internal view returns (bool) {
+        return _roundId < uint256(_config.maxRegularAppealRounds);
     }
 
     /**
-    * @dev Internal function to check if a certain round's appeal has been confirmed
-    * @param _round Round to be checked
-    * @return True if the given round's appeal was confirmed, false otherwise
+    * @dev Internal function to check if a certain appeal exists
+    * @param _appeal Appeal to be checked
+    * @return True if the given appeal has a maker address associated to it, false otherwise
     */
-    function _isRoundAppealConfirmed(AdjudicationRound storage _round) internal view returns (bool) {
-        return _round.appeal.taker != address(0);
+    function _existsAppeal(Appeal storage _appeal) internal view returns (bool) {
+        return _appeal.maker != address(0);
+    }
+
+    /**
+    * @dev Internal function to check if a certain appeal has been confirmed
+    * @param _appeal Appeal to be checked
+    * @return True if the given appeal was confirmed, false otherwise
+    */
+    function _isAppealConfirmed(Appeal storage _appeal) internal view returns (bool) {
+        return _appeal.taker != address(0);
     }
 
     /**
@@ -1507,30 +1575,33 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
 
     /**
     * @dev Private function to draft jurors for a given dispute and round. It assumes the given data is correct
-    * @param _jurorsRequested Number of jurors to be drafted for the given dispute. Note that the drafter might have requested part of the jurors number
     * @param _disputeId Identification number of the dispute to be drafted
     * @param _round Round of the dispute to be drafted
+    * @param _jurorsNumber Number of jurors requested for the dispute round
+    * @param _requestedJurors Number of jurors to be drafted for the given dispute. Note that this number could be part of the jurors number.
     * @param _draftTerm Term in which the dispute was requested to be drafted
     * @param _config Config of the Court at the draft term
     */
     function _draft(
-        uint256 _jurorsRequested,
-        uint256 _disputeId,
+        uint256  _disputeId,
         AdjudicationRound storage _round,
+        uint64 _jurorsNumber,
+        uint256 _requestedJurors,
         Term storage _draftTerm,
         CourtConfig storage _config
     )
         private
     {
+        // TODO: Could not pass selectedJurors due to a stack-too-deep issue here
         // Draft jurors for the requested round
         uint256[7] memory draftParams = [
             uint256(_draftTerm.randomness),
             _disputeId,
-            termId,
+            uint256(termId),
             _round.selectedJurors,
-            _jurorsRequested,
-            _round.jurorsNumber,
-            _config.penaltyPct
+            _requestedJurors,
+            uint256(_jurorsNumber),
+            uint256(_config.penaltyPct)
         ];
         (address[] memory jurors, uint64[] memory weights, uint256 outputLength, uint64 selectedJurors) = jurorsRegistry.draft(draftParams);
 
@@ -1539,12 +1610,15 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
         for (uint256 i = 0; i < outputLength; i++) {
             // If the juror was already registered in the list, then don't add it twice
             address juror = jurors[i];
-            if (_round.jurorsStates[juror].weight == uint64(0)) {
+            JurorState storage jurorState = _round.jurorsStates[juror];
+            if (jurorState.weight == uint64(0)) {
                 _round.jurors.push(juror);
             }
             // We assume a juror cannot be drafted 2^64 times for a round
-            _round.jurorsStates[juror].weight += weights[i];
+            jurorState.weight += weights[i];
         }
+
+        // TODO: return boolean to tell whether the draft has finished or not, cannot do it due to a stack-too-deep issue
     }
 
     // TODO: move to a factory contract
@@ -1554,12 +1628,12 @@ contract Court is IJurorsRegistryOwner, ICRVotingOwner, ISubscriptionsOwner, Tim
 
     // TODO: move to a factory contract
     function _initSubscriptions(ERC20 _feeToken, uint256[5] memory _subscriptionParams) private {
-        uint64 maxUINT64 = uint64(-1);
-        uint256 maxUINT16 = uint16(-1);
+        uint64 maxUint64 = uint64(-1);
+        uint256 maxUint16 = uint16(-1);
 
-        require(_subscriptionParams[0] <= maxUINT64, ERROR_INVALID_PERIOD_DURATION); // _periodDuration
-        require(_subscriptionParams[3] <= maxUINT16, ERROR_INVALID_LATE_PAYMENT_PENALTY); // _latePaymentPenaltyPct
-        require(_subscriptionParams[4] <= maxUINT16, ERROR_INVALID_GOVERNANCE_SHARE); // _governorSharePct
+        require(_subscriptionParams[0] <= maxUint64, ERROR_INVALID_PERIOD_DURATION); // _periodDuration
+        require(_subscriptionParams[3] <= maxUint16, ERROR_INVALID_LATE_PAYMENT_PENALTY); // _latePaymentPenaltyPct
+        require(_subscriptionParams[4] <= maxUint16, ERROR_INVALID_GOVERNANCE_SHARE); // _governorSharePct
         subscriptions.init(
             ISubscriptionsOwner(this),
             jurorsRegistry,

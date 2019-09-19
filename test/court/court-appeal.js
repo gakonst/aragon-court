@@ -2,8 +2,8 @@ const { bn, bigExp } = require('../helpers/numbers')
 const { filterJurors } = require('../helpers/jurors')
 const { assertRevert } = require('../helpers/assertThrow')
 const { assertAmountOfEvents, assertEvent } = require('../helpers/assertEvent')
-const { buildHelper, ROUND_STATES, DISPUTE_STATES } = require('../helpers/court')(web3, artifacts)
-const { OUTCOMES, getVoteId, oppositeOutcome, outcomeFor } = require('../helpers/crvoting')
+const { getVoteId, oppositeOutcome, outcomeFor, OUTCOMES } = require('../helpers/crvoting')
+const { buildHelper, DEFAULTS, ROUND_STATES, DISPUTE_STATES } = require('../helpers/court')(web3, artifacts)
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
 
@@ -109,8 +109,8 @@ contract('Court', ([_, disputer, drafter, appealMaker, appealTaker, juror500, ju
 
                 context('when the appeal maker has enough balance', () => {
                   beforeEach('mint fee tokens for appeal maker', async () => {
-                    await courtHelper.feeToken.generateTokens(appealMaker, bigExp(1e6, 18))
-                    await courtHelper.feeToken.approve(court.address, bigExp(1e6, 18), { from: appealMaker })
+                    const { appealDeposit } = await courtHelper.getAppealFees(disputeId, roundId)
+                    await courtHelper.mintAndApproveFeeTokens(appealMaker, court.address, appealDeposit)
                   })
 
                   it('emits an event', async () => {
@@ -124,7 +124,7 @@ contract('Court', ([_, disputer, drafter, appealMaker, appealTaker, juror500, ju
                     await court.createAppeal(disputeId, roundId, appealMakerRuling, { from: appealMaker })
 
                     const { appealer, appealedRuling, taker, opposedRuling } = await courtHelper.getAppeal(disputeId, roundId)
-                    assert.equal(appealer, appealMaker, 'appealer does not match')
+                    assert.equal(appealer, appealMaker, 'appeal maker does not match')
                     assert.equal(appealedRuling.toString(), appealMakerRuling, 'appealed ruling does not match')
                     assert.equal(taker.toString(), ZERO_ADDRESS, 'appeal taker does not match')
                     assert.equal(opposedRuling.toString(), 0, 'opposed ruling does not match')
@@ -132,7 +132,7 @@ contract('Court', ([_, disputer, drafter, appealMaker, appealTaker, juror500, ju
 
                   it('transfers the appeal deposit to the court', async () => {
                     const { accounting, feeToken } = courtHelper
-                    const expectedAppealDeposit = await courtHelper.getAppealDeposit(disputeId, roundId)
+                    const { appealDeposit } = await courtHelper.getAppealFees(disputeId, roundId)
 
                     const previousCourtBalance = await feeToken.balanceOf(court.address)
                     const previousAccountingBalance = await feeToken.balanceOf(accounting.address)
@@ -144,10 +144,10 @@ contract('Court', ([_, disputer, drafter, appealMaker, appealTaker, juror500, ju
                     assert.equal(previousCourtBalance.toString(), currentCourtBalance.toString(), 'court balances do not match')
 
                     const currentAccountingBalance = await feeToken.balanceOf(accounting.address)
-                    assert.equal(previousAccountingBalance.add(expectedAppealDeposit).toString(), currentAccountingBalance.toString(), 'court accounting balances do not match')
+                    assert.equal(previousAccountingBalance.add(appealDeposit).toString(), currentAccountingBalance.toString(), 'court accounting balances do not match')
 
                     const currentAppealerBalance = await feeToken.balanceOf(appealMaker)
-                    assert.equal(previousAppealerBalance.sub(expectedAppealDeposit).toString(), currentAppealerBalance.toString(), 'sender balances do not match')
+                    assert.equal(previousAppealerBalance.sub(appealDeposit).toString(), currentAppealerBalance.toString(), 'sender balances do not match')
                   })
 
                   it('does not create a new round for the dispute', async () => {
@@ -181,7 +181,7 @@ contract('Court', ([_, disputer, drafter, appealMaker, appealTaker, juror500, ju
                   it('cannot be appealed twice', async () => {
                     await court.createAppeal(disputeId, roundId, appealMakerRuling, { from: appealMaker })
 
-                    await assertRevert(court.createAppeal(disputeId, roundId, appealMakerRuling, { from: appealMaker }), 'CT_ROUND_ALREADY_APPEALED')
+                    await assertRevert(court.createAppeal(disputeId, roundId, appealMakerRuling, { from: appealMaker }), 'CT_INVALID_ADJUDICATION_STATE')
                   })
                 })
 
@@ -223,7 +223,7 @@ contract('Court', ([_, disputer, drafter, appealMaker, appealTaker, juror500, ju
                 await courtHelper.passTerms(courtHelper.appealTerms)
               })
 
-              itIsAtState(roundId, ROUND_STATES.CONFIRMING_APPEAL)
+              itIsAtState(roundId, ROUND_STATES.ENDED)
               itFailsToAppeal(roundId)
             })
 
@@ -279,7 +279,7 @@ contract('Court', ([_, disputer, drafter, appealMaker, appealTaker, juror500, ju
         })
 
         context('for a final round', () => {
-          const roundId = 3
+          const roundId = DEFAULTS.maxRegularAppealRounds.toNumber()
 
           beforeEach('move to final round', async () => {
             await courtHelper.moveToFinalRound({ disputeId })
@@ -344,8 +344,7 @@ contract('Court', ([_, disputer, drafter, appealMaker, appealTaker, juror500, ju
         })
       })
 
-      // TODO: this scenario is not implemented in the contracts yet
-      context.skip('when the given round is not valid', () => {
+      context('when the given round is not valid', () => {
         const roundId = 5
 
         it('reverts', async () => {
@@ -354,8 +353,7 @@ contract('Court', ([_, disputer, drafter, appealMaker, appealTaker, juror500, ju
       })
     })
 
-    // TODO: this scenario is not implemented in the contracts yet
-    context.skip('when the given dispute does not exist', () => {
+    context('when the given dispute does not exist', () => {
       it('reverts', async () => {
         await assertRevert(court.createAppeal(0, 0, OUTCOMES.LOW), 'CT_DISPUTE_DOES_NOT_EXIST')
       })

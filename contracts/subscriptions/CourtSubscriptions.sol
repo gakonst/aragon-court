@@ -340,7 +340,7 @@ contract CourtSubscriptions is IsContract, ISubscriptions, TimeHelpers {
 
     function _setFeeToken(ERC20 _feeToken) internal {
         require(isContract(address(_feeToken)), ERROR_NOT_CONTRACT);
-        if (accumulatedGovernorFees > uint256(0)) {
+        if (accumulatedGovernorFees > 0) {
             transferFeesToGovernor();
         }
         currentFeeToken = _feeToken;
@@ -353,7 +353,7 @@ contract CourtSubscriptions is IsContract, ISubscriptions, TimeHelpers {
     }
 
     function _setGovernorSharePct(uint16 _governorSharePct) internal {
-        require(_governorSharePct <= PctHelpers.base(), ERROR_OVERFLOW);
+        require(PctHelpers.isValid(_governorSharePct), ERROR_OVERFLOW);
         governorSharePct = _governorSharePct;
     }
 
