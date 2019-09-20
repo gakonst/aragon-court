@@ -33,5 +33,5 @@ jobs:
       script: npm test test/subscriptions/*.js
       name: "Subscriptions"
     - stage: coverage
-      script: npm run coverage"
+      script: npm run coverage
       name: "Coverage"
