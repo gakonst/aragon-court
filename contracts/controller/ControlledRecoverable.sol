@@ -9,6 +9,7 @@ import "./Controlled.sol";
 contract ControlledRecoverable is Controlled {
     using SafeERC20 for ERC20;
 
+    // @audit What is CTD? Controlled?
     string private constant ERROR_SENDER_NOT_FUNDS_GOVERNOR = "CTD_SENDER_NOT_FUNDS_GOVERNOR";
     string private constant ERROR_INSUFFICIENT_RECOVER_FUNDS = "CTD_INSUFFICIENT_RECOVER_FUNDS";
     string private constant ERROR_RECOVER_TOKEN_FUNDS_FAILED = "CTD_RECOVER_TOKEN_FUNDS_FAILED";
@@ -19,6 +20,8 @@ contract ControlledRecoverable is Controlled {
     * @dev Ensure the msg.sender is the controller's funds governor
     */
     modifier onlyFundsGovernor {
+        // @audit controller.getFundsGovernor() can steal all funds in any
+        // @audit contract that inherits from ControlledRecoverable
         require(msg.sender == controller.getFundsGovernor(), ERROR_SENDER_NOT_FUNDS_GOVERNOR);
         _;
     }
@@ -37,6 +40,7 @@ contract ControlledRecoverable is Controlled {
     * @param _to Address of the recipient that will be receive all the funds of the requested token
     */
     function recoverFunds(ERC20 _token, address _to) external onlyFundsGovernor {
+        // @audit OK
         uint256 balance = _token.balanceOf(address(this));
         require(balance > 0, ERROR_INSUFFICIENT_RECOVER_FUNDS);
         require(_token.safeTransfer(_to, balance), ERROR_RECOVER_TOKEN_FUNDS_FAILED);

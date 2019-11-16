@@ -22,6 +22,7 @@ contract CRVoting is Controlled, ICRVoting {
     string private constant ERROR_INVALID_COMMITMENT_SALT = "CRV_INVALID_COMMITMENT_SALT";
 
     // Outcome nr. 0 is used to denote a missing vote (default)
+    // @audit Consider replacing these with enums
     uint8 internal constant OUTCOME_MISSING = uint8(0);
     // Outcome nr. 1 is used to denote a leaked vote
     uint8 internal constant OUTCOME_LEAKED = uint8(1);
@@ -30,6 +31,8 @@ contract CRVoting is Controlled, ICRVoting {
     // Besides the options listed above, every vote instance must provide at least 2 outcomes
     uint8 internal constant MIN_POSSIBLE_OUTCOMES = uint8(2);
     // Max number of outcomes excluding the default ones
+    // @audit what's going on here? this will result in 255 - 2 = 253. Seems odd
+    // as a choice
     uint8 internal constant MAX_POSSIBLE_OUTCOMES = uint8(-1) - OUTCOME_REFUSED;
 
     struct CastVote {
@@ -83,6 +86,8 @@ contract CRVoting is Controlled, ICRVoting {
         require(!_existsVote(vote), ERROR_VOTE_ALREADY_EXISTS);
 
         // No need for SafeMath: we already checked the number of outcomes above
+        // @audit maxAllowedOutcome = possibleOutcomes + 2? Shouldn't it be + 3,
+        // for missing / leaked / refused ?
         vote.maxAllowedOutcome = OUTCOME_REFUSED + _possibleOutcomes;
         emit VotingCreated(_voteId, _possibleOutcomes);
     }
@@ -126,11 +131,13 @@ contract CRVoting is Controlled, ICRVoting {
     * @param _salt Salt to decrypt and validate the committed vote of the voter
     */
     function reveal(uint256 _voteId, uint8 _outcome, bytes32 _salt) external voteExists(_voteId) {
+        // @audit is there no time limit? can i just create an reveal on a vote?
         Vote storage vote = voteRecords[_voteId];
         CastVote storage castVote = vote.votes[msg.sender];
         _checkValidSalt(castVote, _outcome, _salt);
         require(_isValidOutcome(vote, _outcome), ERROR_INVALID_OUTCOME);
 
+        // @audit rename to getVoterWeight
         uint256 weight = _ensureVoterCanReveal(_voteId, msg.sender);
 
         castVote.outcome = _outcome;
@@ -235,6 +242,8 @@ contract CRVoting is Controlled, ICRVoting {
     * @return Encrypted outcome
     */
     function encryptVote(uint8 _outcome, bytes32 _salt) public pure returns (bytes32) {
+        // @audit This is DEFINITELY not encryption. Alternative name:
+        // createVoteCommitment, or just inline it in checkValidSalt
         return keccak256(abi.encodePacked(_outcome, _salt));
     }
 
@@ -254,6 +263,7 @@ contract CRVoting is Controlled, ICRVoting {
     */
     function _ensureVoterCanCommit(uint256 _voteId, address _voter) internal {
         ICRVotingOwner owner = _votingOwner();
+        // vote must be at the Adjudication.Committing state
         owner.ensureCanCommit(_voteId, _voter);
     }
 
@@ -264,6 +274,9 @@ contract CRVoting is Controlled, ICRVoting {
     * @return Weight of the voter willing to reveal a vote
     */
     function _ensureVoterCanReveal(uint256 _voteId, address _voter) internal returns (uint256) {
+        // @audit this function is called `ensure` so one would expect that it
+        // returns a boolean or returns nothing, but in this case it returns the weight
+        // for a voter in a vote. 
         // There's no need to check voter weight, as this was done on commit
         ICRVotingOwner owner = _votingOwner();
         uint64 weight = owner.ensureCanReveal(_voteId, _voter);

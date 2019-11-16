@@ -6,6 +6,7 @@ import "./IClock.sol";
 
 
 contract CourtClock is IClock, TimeHelpers {
+    // @audit unused variable
     string private constant ERROR_TERM_OUTDATED = "CLK_TERM_OUTDATED";
     string private constant ERROR_TERM_DOES_NOT_EXIST = "CLK_TERM_DOES_NOT_EXIST";
     string private constant ERROR_TERM_DURATION_TOO_LONG = "CLK_TERM_DURATION_TOO_LONG";
@@ -103,6 +104,8 @@ contract CourtClock is IClock, TimeHelpers {
         }
 
         // Compute term randomness
+        // @audit If the randomness is not called for 256 blocks (1 hour)
+        // this will always revert for that term
         bytes32 newRandomness = _computeTermRandomness(_termId);
         require(newRandomness != bytes32(0), ERROR_TERM_RANDOMNESS_UNAVAILABLE);
         term.randomness = newRandomness;
@@ -201,16 +204,30 @@ contract CourtClock is IClock, TimeHelpers {
             // already assumed to fit in uint64.
             Term storage previousTerm = terms[currentTermId++];
             Term storage currentTerm = terms[currentTermId];
+            // @audit Weird callback behavior here. As implemented:
+            // 1. Call heartbeat via the Controller implementation which
+            // inherits Courtclock
+            // 2. this calls the _onTermTransitioned impl of Controller.sol
+            // 3. which calls _ensureTermConfig on CourtConfig.sol
             _onTermTransitioned(currentTermId);
 
             // Set the start time of the new term. Note that we are using a constant term duration value to guarantee
             // equally long terms, regardless of heartbeats.
+            // @audit TODO: verify that
             // No need for SafeMath: term duration is capped at `MAX_TERM_DURATION`, first term start time by `MAX_FIRST_TERM_DELAY_PERIOD`,
             // and we assume that timestamps (and its derivatives like term ID) won't reach MAX_UINT64, which would be ~5.8e11 years.
             currentTerm.startTime = previousTerm.startTime + termDuration;
 
             // In order to draft a random number of jurors in a term, we use a randomness factor for each term based on a
-            // block number that is set once the term has started. Note that this information could not be known beforehand.
+            // block number that is set once the term has started. Note that
+            // this information could not be known beforehand.
+            // @audit All terms will have the same randomness in this for loop.
+            // Better to call getBlockNumber64() outside of the `for` loop
+            // Huge waste of storage space, better to store start/end block
+            // @audit If the heartbeat does not get called, the result is that
+            // calling it afterwards with maxRequestedTransitions > 1 means that
+            // the same jurors will be set in place for more than just 1 term since
+            // the same randomness is used
             currentTerm.randomnessBN = getBlockNumber64() + 1;
         }
 

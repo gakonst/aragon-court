@@ -79,6 +79,7 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
     }
 
     struct Dispute {
+        // @audit what's the use of IArbitrable here? It's not found in any non-mock files
         IArbitrable subject;           // Arbitrable associated to a dispute
         uint8 possibleRulings;         // Number of possible rulings jurors can vote for each dispute
         uint8 finalRuling;             // Winning ruling of a dispute
@@ -133,6 +134,7 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
     // List of all the disputes created in the Court
     Dispute[] internal disputes;
 
+    // @audit this only gets called with the Adjudicating state, while you have different events for the creation/finalization of a dispute. Consider changing that and the adjudication events to just 1. This allows for easier filtering imo since you fetch everything that is relevant to a state transition and you act based on what happened to it locally
     event DisputeStateChanged(uint256 indexed disputeId, DisputeState indexed state);
     event NewDispute(uint256 indexed disputeId, address indexed subject, uint64 indexed draftTermId, uint64 jurorsNumber);
     event RulingAppealed(uint256 indexed disputeId, uint256 indexed roundId, uint8 ruling);
@@ -189,20 +191,28 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
     * @return Dispute identification number
     */
     function createDispute(IArbitrable _subject, uint8 _possibleRulings) external returns (uint256) {
+        // i can start a dispute with 0 rounds?
         // TODO: Limit the min amount of terms before drafting (to allow for evidence submission)
         // TODO: ERC165 check that _subject conforms to the Arbitrable interface
         // TODO: require(address(_subject) == msg.sender, ERROR_INVALID_DISPUTE_CREATOR);
+        // TODO: Can create a dispute for a non-contract.
+        // Add isContract
+        // will try to heartbeat at the controller if we're not up to date to the latest term
         uint64 termId = _ensureCurrentTerm();
         ISubscriptions subscriptions = _subscriptions();
         require(subscriptions.isUpToDate(address(_subject)), ERROR_SUBSCRIPTION_NOT_PAID);
+        // redundant? are the min/max always going ot be just 2 thing? how many rulings do you allow
         require(_possibleRulings >= MIN_RULING_OPTIONS && _possibleRulings <= MAX_RULING_OPTIONS, ERROR_INVALID_RULING_OPTIONS);
 
         // Create the dispute
         uint64 draftTermId = termId + 1;
+        // Anti pattern, but nothing can be done:
+        // Copying of type struct Court.AdjudicationRound memory[] memory to storage not yet supported.
         uint256 disputeId = disputes.length++;
         Dispute storage dispute = disputes[disputeId];
         dispute.subject = _subject;
         dispute.possibleRulings = _possibleRulings;
+
         CreateDisputeConfig memory config = _getCreateDisputeConfig(draftTermId);
         uint64 jurorsNumber = config.firstRoundJurorsNumber;
         emit NewDispute(disputeId, address(_subject), draftTermId, jurorsNumber);
@@ -221,10 +231,12 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
     * @param _disputeId Identification number of the dispute to be drafted
     */
     function draft(uint256 _disputeId) external disputeExists(_disputeId) {
+        // @audit there is no way to call this with dispute.rounds.length == 0, since the dispute must already be created and it automatically creates a new round
         // Drafts can only be computed when the Court is up-to-date. Note that forcing a term transition won't work since the term randomness
         // is always based on the next term which means it won't be available anyway.
         IClock clock = _clock();
         uint64 requiredTransitions = _clock().getNeededTermTransitions();
+        // @audit why not make ensureCurrentTerm?
         require(uint256(requiredTransitions) == 0, ERROR_TERM_OUTDATED);
         uint64 currentTermId = controller.getLastEnsuredTermId();
 
@@ -235,8 +247,10 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
         // Ensure draft term randomness can be computed for the current block number
         AdjudicationRound storage round = dispute.rounds[dispute.rounds.length - 1];
         uint64 draftTermId = round.draftTermId;
+        // @audit CAREFUL this may revert if 1h passed and nobody called this function via a new dispute/escalation & draft process
         bytes32 draftTermRandomness = clock.ensureTermRandomness(draftTermId);
 
+        // calls the Configconsumer draft config
         // Draft jurors for the given dispute and reimburse fees
         DraftConfig memory config = _getDraftConfig(draftTermId);
         bool draftEnded = _draft(_disputeId, round, currentTermId, draftTermRandomness, config);
@@ -244,6 +258,9 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
         // If the drafting is over, update its state
         if (draftEnded) {
             // Note that we can avoid using SafeMath here since we already ensured `termId` is greater than or equal to `round.draftTermId`
+            // @audit can avoid the store here by adding an if:
+            // uint64 delay = currentTermId - draftTermId;
+            // if delay > 0 { round.delayedTerms = delay }
             round.delayedTerms = currentTermId - draftTermId;
             dispute.state = DisputeState.Adjudicating;
             emit DisputeStateChanged(_disputeId, DisputeState.Adjudicating);
@@ -261,23 +278,30 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
         // Note that if there was a final appeal the adjudication state will be 'Ended'.
         Dispute storage dispute = disputes[_disputeId];
         Config memory config = _getDisputeConfig(dispute);
+        // if it was predraft & stuck can we appeal to increase it?
         _checkAdjudicationState(dispute, _roundId, AdjudicationState.Appealing, config.disputes);
 
         // Ensure that the ruling being appealed in favor of is valid and different from the current winning ruling
         ICRVoting voting = _voting();
         uint256 voteId = _getVoteId(_disputeId, _roundId);
+        // jurors have voted on smth
         uint8 roundWinningRuling = voting.getWinningOutcome(voteId);
+        // appeal on smth else other than the existing outcome
         require(roundWinningRuling != _ruling && voting.isValidOutcome(voteId, _ruling), ERROR_INVALID_APPEAL_RULING);
 
         // Update round appeal state
+        // @audit can i take an old round that's been already appealed and re-appeal it?
+        // shouldn't the createAppeal always be on the latest round?
+        // can't i overwrite appeals made by other people? seems not, onc the appeal is stored, something in the checkAdjudication call transitions the state away from `Appealing`
         AdjudicationRound storage round = dispute.rounds[_roundId];
         Appeal storage appeal = round.appeal;
-        appeal.maker = msg.sender;
+        appeal.maker = msg.sender; // appeal.maker is just some guy
         appeal.appealedRuling = _ruling;
         emit RulingAppealed(_disputeId, _roundId, _ruling);
 
         // Pay appeal deposit
         NextRoundDetails memory nextRound = _getNextRoundDetails(round, _roundId, config);
+        // anybody can create an appeal if they pay the fee
         _depositSenderAmount(nextRound.feeToken, nextRound.appealDeposit);
     }
 
@@ -298,6 +322,8 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
         AdjudicationRound storage round = dispute.rounds[_roundId];
         Appeal storage appeal = round.appeal;
         uint256 voteId = _getVoteId(_disputeId, _roundId);
+        // @audit The ruling can be different from the dispute's ruling? Seems odd. What is the final ruling?
+        // @audit should we just remove the _rulnig parameter and demand that !dispute.ruling is used since there is a 2 ruligns order enforced?
         require(appeal.appealedRuling != _ruling && _voting().isValidOutcome(voteId, _ruling), ERROR_INVALID_APPEAL_RULING);
 
         // Create a new adjudication round for the dispute
@@ -306,7 +332,7 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
         uint256 newRoundId = _createRound(_disputeId, newDisputeState, nextRound.startTerm, nextRound.jurorsNumber, nextRound.jurorFees);
 
         // Update previous round appeal state
-        appeal.taker = msg.sender;
+        appeal.taker = msg.sender; // appeal.taker is going to be the round.triggeredBy
         appeal.opposedRuling = _ruling;
         emit RulingAppealConfirmed(_disputeId, newRoundId, nextRound.startTerm, nextRound.jurorsNumber);
 
@@ -333,7 +359,7 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
     /**
     * @notice Settle penalties for round #`_roundId` of dispute #`_disputeId`
     * @dev In case of a regular round, all the drafted jurors that didn't vote in favor of the final ruling of the given dispute will be slashed.
-    *      For final rounds, jurors are slashed when voting, thus it will considered these rounds settled at once. Rewards have to be manually
+    *      In case of a final round, jurors are slashed when voting, thus it is considered these rounds settled at once. Rewards have to be manually
     *      claimed through `settleReward` which will return pre-slashed tokens for the winning jurors of a final round as well.
     * @param _disputeId Identification number of the dispute to settle penalties for
     * @param _roundId Identification number of the dispute round to settle penalties for
@@ -346,7 +372,7 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
         Dispute storage dispute = disputes[_disputeId];
         require(_roundId == 0 || dispute.rounds[_roundId - 1].settledPenalties, ERROR_PREV_ROUND_NOT_SETTLED);
 
-        // Ensure given round has not been settled yet
+        // Ensure given round has not been fully settled yet
         AdjudicationRound storage round = dispute.rounds[_roundId];
         require(!round.settledPenalties, ERROR_ROUND_ALREADY_SETTLED);
 
@@ -356,7 +382,7 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
 
         // Set the number of jurors that voted in favor of the final ruling if we haven't started settling yet
         uint256 voteId = _getVoteId(_disputeId, _roundId);
-        if (round.settledJurors == 0) {
+        if (round.settledJurors == 0) { // @audit gets set in `_settleRegularRoundPenalties`
             // Note that we are safe to cast the tally of a ruling to uint64 since the highest value a ruling can have is equal to the jurors
             // number for regular rounds or to the total active balance of the registry for final rounds, and both are ensured to fit in uint64.
             ICRVoting voting = _voting();
@@ -371,10 +397,13 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
             uint256 jurorsSettled = _settleRegularRoundPenalties(round, voteId, finalRuling, config.disputes.penaltyPct, _jurorsToSettle, config.minActiveBalance);
             treasury.assign(feeToken, msg.sender, config.fees.settleFee.mul(jurorsSettled));
         } else {
+            // @audit In the final round, since there is no drafting, any juror pre-pays their activeBalance * slashing pct
+            // in ther `commit` phase.
             // For the final appeal round, there is no need to settle in batches since, to guarantee scalability,
             // all the tokens are collected from jurors when they vote, and those jurors who
             // voted in favor of the winning ruling can claim their collected tokens back along with their reward.
             // Note that the caller of this function is not being reimbursed.
+            // @audit consider breaking this function up in `settleFinalRoundPenalties(disputeId)`
             round.settledPenalties = true;
         }
 
@@ -396,6 +425,10 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
         // Ensure dispute round penalties are settled first
         Dispute storage dispute = disputes[_disputeId];
         AdjudicationRound storage round = dispute.rounds[_roundId];
+        // @audit This can only be called after all penalties have been settled
+        // @audit Maybe add a redundant `ensureFinalRuling` (although this is guaranteed
+        // by the fact that if round.settledPenalties gets set to true, then `ensureFinalRuling`
+        // must have been called in `settlePenalties`)
         require(round.settledPenalties, ERROR_ROUND_NOT_SETTLED);
 
         // Ensure given juror was not rewarded yet and was drafted for the given round
@@ -411,21 +444,25 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
 
         // Note that the number of coherent jurors has to be greater than zero since we already ensured the juror has voted in favor of the
         // final ruling, therefore there will be at least one coherent juror and divisions below are safe.
+        // @audit This works, assuming that CRVoting is correctly implemented. If during the upgrade process there is a badly implemented ICRVoting changed via the modules config, then the below operations will not be safe.
         uint256 coherentJurors = round.coherentJurors;
         uint256 collectedTokens = round.collectedTokens;
         IJurorsRegistry jurorsRegistry = _jurorsRegistry();
 
         // Distribute the collected tokens of the jurors that were slashed weighted by the winning jurors. Note that we are penalizing jurors
         // that refused intentionally their vote for the final round.
+        // if you REFUSE you get slashed?
         if (collectedTokens > 0) {
+            //@audit `coherentJurors` and `jurorState.weight` are multiplied by 1000 as well in the final round so this operation is safe
             jurorsRegistry.assignTokens(_juror, uint256(jurorState.weight).mul(collectedTokens) / coherentJurors);
         }
 
-        // Reward the winning juror
+        // Reward the winning juror with fees
         Config memory config = _getDisputeConfig(dispute);
         _treasury().assign(config.fees.token, _juror, round.jurorFees.mul(jurorState.weight) / coherentJurors);
 
         // Set the lock for final round
+        // @audit What is this lock useful for? Can't this be abused to massively lock up a lot of the ANJ supply for all winners?
         if (!_isRegularRound(_roundId, config)) {
             // Round end term ID (as it's final there's no draft delay nor appeal) plus the lock period
             DisputesConfig memory disputesConfig = config.disputes;
@@ -466,6 +503,7 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
         // If the appeal wasn't confirmed, return the entire deposit to appeal maker
         ITreasury treasury = _treasury();
         if (!_isAppealConfirmed(appeal)) {
+            // @audit this was a good appeal, nobody responded to the challenge
             treasury.assign(feeToken, appeal.maker, appealDeposit);
             return;
         }
@@ -473,7 +511,7 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
         // If the appeal was confirmed and there is a winner, we transfer the total deposit to that party. Otherwise, if the final ruling wasn't
         // selected by any of the appealing parties or no juror voted in the in favor of the possible outcomes, we split it between both parties.
         // Note that we are safe to access the dispute final ruling, since we already ensured that round penalties were settled.
-        uint8 finalRuling = dispute.finalRuling;
+        uint8 finalRuling = dispute.finalRuling; // @audit ensureFinalRuling(dispute) for redundancy?
         uint256 totalDeposit = appealDeposit.add(confirmAppealDeposit);
         if (appeal.appealedRuling == finalRuling) {
             // No need for SafeMath: collateral factors are greater than zero, then both appeal deposits are greater than `totalFees`
@@ -495,6 +533,7 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
     * @param _voteId ID of the vote instance to request the weight of a voter for
     */
     function ensureCanCommit(uint256 _voteId) external {
+        // @audit OK
         (Dispute storage dispute, uint256 roundId) = _decodeVoteId(_voteId);
         Config memory config = _getDisputeConfig(dispute);
 
@@ -509,6 +548,7 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
     * @param _voter Address of the voter querying the weight of
     */
     function ensureCanCommit(uint256 _voteId, address _voter) external onlyVoting {
+        // @audit OK
         (Dispute storage dispute, uint256 roundId) = _decodeVoteId(_voteId);
         Config memory config = _getDisputeConfig(dispute);
 
@@ -526,6 +566,7 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
     * @return Weight of the requested juror for the requested dispute's round
     */
     function ensureCanReveal(uint256 _voteId, address _voter) external returns (uint64) {
+        // @audit OK, but rename to getRevealWeight. This does not ensureanything?
         (Dispute storage dispute, uint256 roundId) = _decodeVoteId(_voteId);
         Config memory config = _getDisputeConfig(dispute);
 
@@ -731,6 +772,7 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
         // Create new requested round
         uint256 roundId = dispute.rounds.length++;
         AdjudicationRound storage round = dispute.rounds[roundId];
+        // selectedJurors is implicitly set to 0
         round.draftTermId = _draftTermId;
         round.jurorsNumber = _jurorsNumber;
         round.jurorFees = _jurorFees;
@@ -739,6 +781,7 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
         // Create new vote for the new round
         ICRVoting voting = _voting();
         uint256 voteId = _getVoteId(_disputeId, roundId);
+        // dispute+round get packed in 1 variable
         voting.create(voteId, dispute.possibleRulings);
         return roundId;
     }
@@ -801,17 +844,18 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
     * @param _jurorsToSettle Maximum number of jurors to be slashed in this call. It can be set to zero to slash all the losing jurors of the round.
     * @return Number of jurors slashed for the given round
     */
-    function _settleRegularRoundPenalties(
+    function _settleRegularRoundPenalties( // @audit: consider renaming to: settleJurorsInRegularRound, there may be no penalties
         AdjudicationRound storage _round,
         uint256 _voteId,
         uint8 _finalRuling,
-        uint16 _penaltyPct,
+        uint16 _penaltyPct, // percent is % = 100, if it's a myriad you should rename it
         uint256 _jurorsToSettle,
         uint256 _minActiveBalance
     )
         internal
         returns (uint256)
     {
+        // @audit: consider adding a check that this is indeed a regular round, just in case.
         uint64 termId = _ensureCurrentTerm();
         // The batch starts where the previous one ended, stored in _round.settledJurors
         uint256 roundSettledJurors = _round.settledJurors;
@@ -830,6 +874,7 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
         }
 
         // Update the number of round settled jurors.
+        
         // No need for SafeMath: the highest number of jurors to be settled for a round could be the `jurorsNumber` itself, which is a uint64.
         _round.settledJurors = uint64(roundSettledJurors + batchSettledJurors);
 
@@ -840,12 +885,15 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
         for (uint256 i = 0; i < batchSettledJurors; i++) {
             address juror = _round.jurors[roundSettledJurors + i];
             jurors[i] = juror;
+            // @audit this is a regular round so the juror's weight won't be multiplied by 1000
+            // The weight expresses how many times the juror was elected for this round
             penalties[i] = _minActiveBalance.pct(_penaltyPct).mul(_round.jurorsStates[juror].weight);
         }
 
         // Check which of the jurors voted in favor of the final ruling of the dispute in this round. Ask the registry to slash or unlocked the
         // locked active tokens of each juror depending on their vote, and finally store the total amount of slashed tokens.
         bool[] memory jurorsInFavor = _voting().getVotersInFavorOf(_voteId, _finalRuling, jurors);
+        // @audit In non-final rounds we accumulate the tokens per slash/unlock batch
         _round.collectedTokens = _round.collectedTokens.add(jurorsRegistry.slashOrUnlock(termId, jurors, penalties, jurorsInFavor));
         return batchSettledJurors;
     }
@@ -859,6 +907,7 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
     * @return Computed weight of the requested juror for the final round of the given dispute
     */
     function _computeJurorWeight(Dispute storage _dispute, uint256 _roundId, address _juror, Config memory _config) internal returns (uint64) {
+        // @audit This function gets called only in `ensureCanCommit`. Consider inlining it.
         AdjudicationRound storage round = _dispute.rounds[_roundId];
 
         return _isRegularRound(_roundId, _config)
@@ -878,9 +927,16 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
     function _computeJurorWeightForFinalRound(Config memory _config, AdjudicationRound storage _round, address _juror) internal
         returns (uint64)
     {
+        // @audit Similar to `_computeJurorWeight`, consider inlining this function to `ensureCanCommit`.
+        // @audit This function not only "computes" the weight, which reminds you of "getWeight".
+        // It also collects tokens from the jurors participating in the last round as a bond,
+        // and also updates the round's collected tokens and juror's weight.
+        // Consider renaming to something more descriptive.
+
         // Fetch active balance and multiples of the min active balance from the registry
         IJurorsRegistry jurorsRegistry = _jurorsRegistry();
         uint256 activeBalance = jurorsRegistry.activeBalanceOfAt(_juror, _round.draftTermId);
+
         uint64 weight = _getMinActiveBalanceMultiple(activeBalance, _config.minActiveBalance);
 
         // If the juror weight for the last round is zero, return zero
@@ -893,6 +949,7 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
         uint256 weightedPenalty = activeBalance.pct(_config.disputes.penaltyPct);
 
         // If it was not possible to collect the amount to be locked, return 0 to prevent juror from voting
+        // @audit jurors get pre-slashed in the final round!
         if (!jurorsRegistry.collectTokens(_juror, weightedPenalty, _getLastEnsuredTermId())) {
             return uint64(0);
         }
@@ -963,7 +1020,7 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
         if (_roundId >= disputesConfig.maxRegularAppealRounds - 1) {
             // If the next round is the final round, no draft is needed.
             nextRound.newDisputeState = DisputeState.Adjudicating;
-            // The number of jurors will be the number of times the minimum stake is hold in the registry,
+            // The number of jurors will be the number of times the minimum stake is held in the registry,
             // multiplied by a precision factor to help with division rounding.
             // Total active balance is guaranteed to never be greater than `2^64 * minActiveBalance / FINAL_ROUND_WEIGHT_PRECISION`.
             // Thus, the jurors number for a final round will always fit in uint64.
@@ -972,6 +1029,8 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
             uint64 jurorsNumber = _getMinActiveBalanceMultiple(totalActiveBalance, _config.minActiveBalance);
             nextRound.jurorsNumber = jurorsNumber;
             // Calculate fees for the final round using the appeal start term of the current round
+            // @audit nextRound.feeToken will be the same in either case, so maybe just remove the feeToken from returned values from the getFinalRoundFees and the getRegularRoundFees
+            // @audit nit-consistency between the if/else, always use next.jurorsNumber or assign it to 
             (nextRound.feeToken, nextRound.jurorFees, nextRound.totalFees) = _getFinalRoundFees(_config.fees, jurorsNumber);
         } else {
             // For a new regular rounds we need to draft jurors
@@ -983,6 +1042,7 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
         }
 
         // Calculate appeal collateral
+        // @audit Ensure that the appealDeposit > 0
         nextRound.appealDeposit = nextRound.totalFees.pct256(disputesConfig.appealCollateralFactor);
         nextRound.confirmAppealDeposit = nextRound.totalFees.pct256(disputesConfig.appealConfirmCollateralFactor);
         return nextRound;
@@ -999,6 +1059,7 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
         // Jurors number are increased by a step factor on each appeal
         uint64 jurorsNumber = _round.jurorsNumber.mul(_config.appealStepFactor);
         // Make sure it's odd to enforce avoiding a tie. Note that it can happen if any of the jurors don't vote anyway.
+        // @audit you can do bitwise & with 1 instead, (very slightly) more efficient
         if (uint256(jurorsNumber) % 2 == 0) {
             jurorsNumber++;
         }
@@ -1020,7 +1081,7 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
 
         // If the dispute is executed or the given round is not the last one, we consider it ended
         uint256 numberOfRounds = _dispute.rounds.length;
-        // No need for SafeMath: this function assumes the given round exists, and therfore length of rounds array is >= 1
+        // No need for SafeMath: this function assumes the given round exists, and therefore length of rounds array is >= 1
         if (_dispute.state == DisputeState.Executed || _roundId < numberOfRounds - 1) {
             return AdjudicationState.Ended;
         }
@@ -1056,6 +1117,7 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
         bool isLastRoundAppealed = _existsAppeal(round.appeal);
         // No need for SafeMath: round state durations are safely capped at config
         uint64 appealConfirmationStartTerm = appealStartTerm + _config.appealTerms;
+        // @audit 
         if (!isLastRoundAppealed) {
             // If given term is before the appeal confirmation start term, then the last round can still be appealed. Otherwise, it is ended.
             if (_termId < appealConfirmationStartTerm) {
@@ -1133,6 +1195,7 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
     */
     function _decodeVoteId(uint256 _voteId) internal view returns (Dispute storage dispute, uint256 roundId) {
         uint256 disputeId = _voteId >> 128;
+        // @audit shouldn't this mask out the upper 16 bytes?
         roundId = _voteId & 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF;
         _checkRoundExists(disputeId, roundId);
         dispute = disputes[disputeId];
@@ -1144,7 +1207,10 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
     * @param _roundId Identification number of the dispute round querying the vote ID of
     * @return Identification number of the vote of the requested dispute round
     */
-    function _getVoteId(uint256 _disputeId, uint256 _roundId) internal pure returns (uint256) {
+    function _getVoteId(uint256 _disputeId, uint256 _roundId) internal pure
+    returns (uint256) 
+    {
+        // @audit these must be uint128 - overflow otherwise
         return (_disputeId << 128) + _roundId;
     }
 
@@ -1165,6 +1231,7 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
         // The total fees for regular rounds also considers the heartbeat, the number of drafts, and the number of settles
         uint256 draftAndSettleFees = (_config.draftFee.add(_config.settleFee)).mul(uint256(_jurorsNumber));
         totalFees = jurorFees.add(draftAndSettleFees);
+        // totalFees[i] = (JurorFees + DraftFees + SettleFees)
     }
 
     /**
@@ -1206,6 +1273,8 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
     * @return Number of times that the active balance contains the min active balance (multiplied by precision)
     */
     function _getMinActiveBalanceMultiple(uint256 _activeBalance, uint256 _minActiveBalance) internal pure returns (uint64) {
+        // @audit This function can be catastrophic if called to get the weight of a juror in a non-final round. 
+        // Consider renaming it to getWeightAtFinalRound
         // Note that jurors may not reach the minimum active balance since some might have been slashed. If that occurs,
         // these jurors cannot vote in the final round.
         if (_activeBalance < _minActiveBalance) {
@@ -1227,6 +1296,7 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
     * @return True if all the requested jurors for the given round were drafted, false otherwise
     */
     function _draft(
+        // @audit OK
         uint256  _disputeId,
         AdjudicationRound storage _round,
         uint64 _currentTermId,
@@ -1238,6 +1308,7 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
     {
         uint64 jurorsNumber = _round.jurorsNumber;
         uint64 selectedJurors = _round.selectedJurors;
+        // why underscore to variable?
         uint64 maxJurorsPerDraftBatch_ = maxJurorsPerDraftBatch;
         // No need for SafeMath: selectedJurors is set in `_draft` function, by adding to it `requestedJurors`. The line below prevents underflow
         uint64 jurorsToBeDrafted = jurorsNumber - selectedJurors;
@@ -1257,13 +1328,16 @@ contract Court is ControlledRecoverable, ICRVotingOwner {
 
         // Draft jurors for the requested round
         IJurorsRegistry jurorsRegistry = _jurorsRegistry();
+        // @audit jurors + number of drafted jurors. is that really necessary? can't we just return the array w/o the length?
         (address[] memory jurors, uint256 draftedJurors) = jurorsRegistry.draft(draftParams);
 
         // Update round with drafted jurors information
         // No need for SafeMath: this cannot be greater than `jurorsNumber`
         uint64 newSelectedJurors = selectedJurors + uint64(draftedJurors);
         _round.selectedJurors = newSelectedJurors;
+        // @audit The jurors array may contain duplicated elements, in case 
         _updateRoundDraftedJurors(_round, jurors, draftedJurors);
+        // can we ever end up with more jurors than desired?
         bool draftEnded = newSelectedJurors == jurorsNumber;
 
         // Transfer fees corresponding to the actual number of drafted jurors

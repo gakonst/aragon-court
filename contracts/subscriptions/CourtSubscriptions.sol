@@ -50,6 +50,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     }
 
     struct Period {
+        // @audit rename to courtTerm, 
         uint64 balanceCheckpoint;               // Court term ID of a period used to fetch the total active balance of the jurors registry
         ERC20 feeToken;                         // Fee token corresponding to a certain subscription period
         uint256 feeAmount;                      // Amount of fees paid for a certain subscription period
@@ -74,7 +75,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     uint256 public currentFeeAmount;
 
     // Number of periods that can be paid in advance including the current period. Paying in advance has some drawbacks:
-    // - Fee amount could increase, while pre-payments would be made with the old rate.
+    // - Fee amount could increase, while pre-payments would be made with the old rate. // @audit it could also decrease!
     // - Fees are distributed among jurors when the payment is made, so jurors activating after a pre-payment won't get their share of it.
     uint256 public prePaymentPeriods;
 
@@ -113,7 +114,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     * @param _governorSharePct Initial permyriad of subscription fees that will be allocated to the governor of the Court (‱ - 1/10,000)
     */
     constructor(
-        Controller _controller,
+        Controller _controller, // @audit since this is a controlled contract why dont you also put these config options in the controller config ?
         uint64 _periodDuration,
         ERC20 _feeToken,
         uint256 _feeAmount,
@@ -129,6 +130,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
         require(_periodDuration > 0, ERROR_PERIOD_DURATION_ZERO);
 
         periodDuration = _periodDuration;
+        // @audit combine these 2 functions, overabstraction
         _setFeeToken(_feeToken);
         _setFeeAmount(_feeAmount);
         _setPrePaymentPeriods(_prePaymentPeriods);
@@ -143,6 +145,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     * @param _periods Number of periods to be paid in total since the last paid period
     */
     function payFees(address _to, uint256 _periods) external {
+        // @audit OK
         Subscriber storage subscriber = subscribers[_to];
         require(!subscriber.paused, ERROR_SUBSCRIPTION_PAUSED);
 
@@ -159,9 +162,11 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     * @param _periods Number of periods to be paid in total
     */
     function resume(uint256 _periods) external {
+        // @audit OK
         Subscriber storage subscriber = subscribers[msg.sender];
         require(subscriber.paused, ERROR_SUBSCRIPTION_NOT_PAUSED);
 
+        // @audit shouldn't `periods` be all the periods we have delayed?
         _payFees(subscriber, msg.sender, msg.sender, _periods);
 
         subscriber.paused = false;
@@ -173,6 +178,8 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     * @param _amount Amount of fee tokens to be donated
     */
     function donate(uint256 _amount) external {
+        // @audit Why would anybody do that? They could donate by just sending funds to the court.
+        // NEVER assume `period.collectedFees` and `feeToken.balanceOf` could be associated
         require(_amount > 0, ERROR_DONATION_AMOUNT_ZERO);
 
         uint256 currentPeriodId = _getCurrentPeriodId();
@@ -191,6 +198,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     * @param _periodId Identification number of the period which fees are claimed for
     */
     function claimFees(uint256 _periodId) external {
+        // @audit OK
         // Juror share fees can only be claimed for past periods
         require(_periodId < _getCurrentPeriodId(), ERROR_NON_PAST_PERIOD);
         Period storage period = periods[_periodId];
@@ -198,6 +206,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
 
         // Check claiming juror has share fees to be transferred
         (uint64 periodBalanceCheckpoint, uint256 totalActiveBalance) = _ensurePeriodBalanceDetails(_periodId, period);
+        // @audit returns the % the juror owns at that term
         uint256 jurorShare = _getJurorShare(msg.sender, period, periodBalanceCheckpoint, totalActiveBalance);
         require(jurorShare > 0, ERROR_JUROR_NOTHING_TO_CLAIM);
 
@@ -211,6 +220,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     * @notice Pause sender subscriptions
     */
     function pause() external {
+        // @audit OK
         Subscriber storage subscriber = subscribers[msg.sender];
         require(subscriber.subscribed, ERROR_SENDER_NOT_SUBSCRIBED);
 
@@ -222,6 +232,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     * @notice Transfer owed fees to the governor
     */
     function transferFeesToGovernor() external {
+        // @audit OK
         require(accumulatedGovernorFees > 0, ERROR_GOVERNOR_SHARE_FEES_ZERO);
         _transferFeesToGovernor();
     }
@@ -233,6 +244,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     * @return totalActiveBalance Total amount of juror tokens active in the Court at the corresponding used checkpoint
     */
     function ensurePeriodBalanceDetails(uint256 _periodId) external returns (uint64 periodBalanceCheckpoint, uint256 totalActiveBalance) {
+        // @audit OK
         Period storage period = periods[_periodId];
         return _ensurePeriodBalanceDetails(_periodId, period);
     }
@@ -242,6 +254,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     * @param _feeAmount New amount of fees to be paid for each subscription period
     */
     function setFeeAmount(uint256 _feeAmount) external onlyConfigGovernor {
+        // @audit OK
         _setFeeAmount(_feeAmount);
     }
 
@@ -252,6 +265,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     * @param _feeAmount New amount of fees to be paid for each subscription period
     */
     function setFeeToken(ERC20 _feeToken, uint256 _feeAmount) external onlyConfigGovernor {
+        // @audit OK
         // The `setFeeToken` function transfers governor's accumulated fees, so must be executed first.
         _setFeeToken(_feeToken);
         _setFeeAmount(_feeAmount);
@@ -262,6 +276,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     * @param _prePaymentPeriods New number of periods that can be paid in advance
     */
     function setPrePaymentPeriods(uint256 _prePaymentPeriods) external onlyConfigGovernor {
+        // @audit OK
         _setPrePaymentPeriods(_prePaymentPeriods);
     }
 
@@ -270,6 +285,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     * @param _latePaymentPenaltyPct New permyriad of subscription fees that will be applied as penalty for not paying during proper period
     */
     function setLatePaymentPenaltyPct(uint16 _latePaymentPenaltyPct) external onlyConfigGovernor {
+        // @audit OK
         _setLatePaymentPenaltyPct(_latePaymentPenaltyPct);
     }
 
@@ -278,6 +294,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     * @param _governorSharePct New permyriad of subscription fees that will be allocated to the governor of the Court (‱ - 1/10,000)
     */
     function setGovernorSharePct(uint16 _governorSharePct) external onlyConfigGovernor {
+        // @audit OK
         _setGovernorSharePct(_governorSharePct);
     }
 
@@ -286,6 +303,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     * @param _resumePrePaidPeriods New number of periods a subscriber must pre-pay in order to resume his activity after pausing
     */
     function setResumePrePaidPeriods(uint256 _resumePrePaidPeriods) external onlyConfigGovernor {
+        // @audit OK
         _setResumePrePaidPeriods(_resumePrePaidPeriods);
     }
 
@@ -295,7 +313,9 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     * @return True if subscriber has paid all the fees up to current period, false otherwise
     */
     function isUpToDate(address _subscriber) external view returns (bool) {
+        // @audit OK
         Subscriber storage subscriber = subscribers[_subscriber];
+        // @audit subscription on, not paused, and must've paid at least up to the current period
         return subscriber.subscribed && !subscriber.paused && subscriber.lastPaymentPeriodId >= _getCurrentPeriodId();
     }
 
@@ -304,6 +324,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     * @return Identification number of the current period
     */
     function getCurrentPeriodId() external view returns (uint256) {
+        // @audit OK
         return _getCurrentPeriodId();
     }
 
@@ -318,6 +339,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     function getCurrentPeriod() external view
         returns (ERC20 feeToken, uint256 feeAmount, uint64 balanceCheckpoint, uint256 totalActiveBalance, uint256 collectedFees)
     {
+        // @audit OK
         uint256 currentPeriodId = _getCurrentPeriodId();
         Period storage period = periods[currentPeriodId];
 
@@ -335,6 +357,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     * @return totalActiveBalance Total amount of juror tokens active in the Court at the corresponding used checkpoint
     */
     function getPeriodBalanceDetails(uint256 _periodId) external view returns (uint64 periodBalanceCheckpoint, uint256 totalActiveBalance) {
+        // @audit OK
         return _getPeriodBalanceDetails(_periodId);
     }
 
@@ -349,6 +372,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     function getSubscriber(address _subscriber) external view
         returns (bool subscribed, bool paused, uint64 lastPaymentPeriodId, uint64 previousDelayedPeriods)
     {
+        // @audit OK
         Subscriber storage subscriber = subscribers[_subscriber];
         subscribed = subscriber.subscribed;
         paused = subscriber.paused;
@@ -362,6 +386,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     * @return Number of overdue payments for the requested subscriber
     */
     function getDelayedPeriods(address _subscriber) external view returns (uint256) {
+        // @audit OK
         Subscriber storage subscriber = subscribers[_subscriber];
         uint256 currentPeriodId = _getCurrentPeriodId();
         return _getDelayedPeriods(subscriber, currentPeriodId);
@@ -378,6 +403,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     function getPayFeesDetails(address _subscriber, uint256 _periods) external view
         returns (address tokenAddress, uint256 amountToPay, uint256 newLastPeriodId)
     {
+        // @audit OK, add a require(_period > 0), because `getPayFeesDetails` expects a >0 `_periods`
         Subscriber storage subscriber = subscribers[_subscriber];
         uint256 currentPeriodId = _getCurrentPeriodId();
 
@@ -394,6 +420,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     * @return jurorShare Amount of share fees owed to the given juror for the requested period
     */
     function getJurorShare(address _juror, uint256 _periodId) external view returns (ERC20 feeToken, uint256 jurorShare) {
+        // @audit OK
         Period storage period = periods[_periodId];
         uint64 periodBalanceCheckpoint;
         uint256 totalActiveBalance = period.totalActiveBalance;
@@ -417,6 +444,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     * @return True if the owed share fees have already been claimed, false otherwise
     */
     function hasJurorClaimed(address _juror, uint256 _periodId) external view returns (bool) {
+        // @audit OK
         return periods[_periodId].claimedFees[_juror];
     }
 
@@ -428,6 +456,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     * @param _periods Number of periods to be paid in total since the last paid period
     */
     function _payFees(Subscriber storage _subscriber, address _from, address _to, uint256 _periods) internal {
+        // @audit OK, `_to` MUST be the key of `_subscriber`, otherwise a wrong event could be emitted
         require(_periods > 0, ERROR_PAYING_ZERO_PERIODS);
 
         // Ensure fee token data for the current period
@@ -493,6 +522,8 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     function _ensurePeriodBalanceDetails(uint256 _periodId, Period storage _period) internal
         returns (uint64 periodBalanceCheckpoint, uint256 totalActiveBalance)
     {
+        // @audit OK, but can be be problematic if in the future gets called with
+        // a non-corresponding period/periodId pair
         totalActiveBalance = _period.totalActiveBalance;
 
         // Set balance details for the given period if these haven't been set yet
@@ -510,6 +541,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     * @param _feeAmount New amount of fees to be paid for each subscription period
     */
     function _setFeeAmount(uint256 _feeAmount) internal {
+        // @audit OK
         require(_feeAmount > 0, ERROR_FEE_AMOUNT_ZERO);
 
         emit FeeAmountChanged(currentFeeAmount, _feeAmount);
@@ -521,6 +553,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     * @param _feeToken New ERC20 token to be used for the subscription fees
     */
     function _setFeeToken(ERC20 _feeToken) internal {
+        // @audit OK
         require(isContract(address(_feeToken)), ERROR_FEE_TOKEN_NOT_CONTRACT);
 
         if (accumulatedGovernorFees > 0) {
@@ -535,6 +568,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     * @param _prePaymentPeriods New number of periods that can be paid in advance including the current period
     */
     function _setPrePaymentPeriods(uint256 _prePaymentPeriods) internal {
+        // @audit OK
         // The pre payments period number must contemplate the current period. Thus, it must be greater than zero.
         require(_prePaymentPeriods > 0, ERROR_PREPAYMENT_PERIODS_ZERO);
         // It must be also greater than or equal to the number of resume pre-paid periods since these are always paid in advance, and we must
@@ -551,6 +585,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     * @param _latePaymentPenaltyPct New permyriad of subscription fees that will be applied as penalty for not paying during proper period
     */
     function _setLatePaymentPenaltyPct(uint16 _latePaymentPenaltyPct) internal {
+        // @audit OK
         emit LatePaymentPenaltyPctChanged(latePaymentPenaltyPct, _latePaymentPenaltyPct);
         latePaymentPenaltyPct = _latePaymentPenaltyPct;
     }
@@ -560,6 +595,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     * @param _governorSharePct New permyriad of subscription fees that will be allocated to the governor of the Court (‱ - 1/10,000)
     */
     function _setGovernorSharePct(uint16 _governorSharePct) internal {
+        // @audit OK
         // Check governor share is not greater than 10,000‱
         require(PctHelpers.isValid(_governorSharePct), ERROR_OVERRATED_GOVERNOR_SHARE_PCT);
 
@@ -572,6 +608,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     * @param _resumePrePaidPeriods New number of periods a subscriber must pre-pay in order to resume his activity after pausing
     */
     function _setResumePrePaidPeriods(uint256 _resumePrePaidPeriods) internal {
+        // @audit OK
         // Check resume resume pre-paid periods it not above the number of allowed pre payment periods. Since these periods are always paid in
         // advance, we must make sure there won't be users covering too many periods in the future to avoid skipping fee changes or
         // excluding many jurors from their corresponding rewards.
@@ -591,6 +628,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
         require(termId > 0, ERROR_COURT_HAS_NOT_STARTED);
 
         // No need for SafeMath: we already checked that the term ID is at least 1
+        // @audit OK, periodDuration is set once in the constructor and it's required to be positive
         uint64 periodId = (termId - START_TERM_ID) / periodDuration;
         return uint256(periodId);
     }
@@ -601,6 +639,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     * @return Court term where the given period starts
     */
     function _getPeriodStartTermId(uint256 _periodId) internal view returns (uint64) {
+        // @audit OK
         // Periods are measured in Court terms. Since Court terms are represented in uint64, we are safe to use uint64 for period ids too.
         // We are using SafeMath here because if any user calls `getPeriodBalanceDetails` for a huge period ID,
         // it would overflow and therefore return wrong information.
@@ -614,6 +653,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     * @return feeAmount Amount of fees to be paid during the given period
     */
     function _getPeriodFeeTokenAndAmount(Period storage _period) internal view returns (ERC20 feeToken, uint256 feeAmount) {
+        // @audit OK
         // Return current fee token address and amount if these haven't been set for the given period yet
         feeToken = _period.feeToken;
         if (feeToken == ERC20(0)) {
@@ -639,6 +679,8 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
         uint256 regularPeriods = 0;
         uint256 delayedPeriods = 0;
         uint256 resumePeriods = 0;
+        // @audit unused variables newLastPeriodId, remove from ret values
+        // Consider returning regularPeriods + resumePeriods together, instead of separately
         (newLastPeriodId, regularPeriods, delayedPeriods, resumePeriods) = _getPayingPeriodsDetails(_subscriber, _periods, _currentPeriodId);
 
         // Regular periods to be paid is equal to `(regularPeriods + resumePeriods) * _feeAmount`
@@ -672,12 +714,14 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
 
         // Check if the subscriber has already been subscribed
         if (!_subscriber.subscribed) {
+            // @audit OK, simple case where you pay for N periods
             // If the subscriber was not subscribed before, there are no delayed nor resumed periods
             resumePeriods = 0;
             delayedPeriods = 0;
             regularPeriods = _periods;
             // The number of periods to be paid includes the current period, thus we subtract one unit.
             // No need for SafeMath: the number of periods is at least one.
+            // subscribe up to then
             newLastPeriodId = _currentPeriodId.add(_periods) - 1;
         } else {
             uint256 totalDelayedPeriods = _getDelayedPeriods(_subscriber, _currentPeriodId);
@@ -724,6 +768,7 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     * @return Number of overdue payments for the requested subscriber
     */
     function _getDelayedPeriods(Subscriber storage _subscriber, uint256 _currentPeriodId) internal view returns (uint256) {
+        // @audit OK
         // If the given subscriber was not subscribed yet, there are no pending payments
         if (!_subscriber.subscribed) {
             return 0;
@@ -742,6 +787,8 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
 
         // If the given subscriber was already subscribed, then the current period is not considered delayed
         // No need for SafeMath: we already know last payment period is before current period
+        // @audit since we already guaranteed that lastPaymentPeriodId < _currentPeriodId,
+        // this cannot underflow
         return _currentPeriodId - lastPaymentPeriodId - 1;
     }
 
@@ -751,12 +798,14 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     * @return periodBalanceCheckpoint Court term ID used to fetch the total active balance of the jurors registry
     * @return totalActiveBalance Total amount of juror tokens active in the Court at the corresponding used checkpoint
     */
+    // if thre are no disputes what if randomness for too long?
     function _getPeriodBalanceDetails(uint256 _periodId) internal view returns (uint64 periodBalanceCheckpoint, uint256 totalActiveBalance) {
         uint64 periodStartTermId = _getPeriodStartTermId(_periodId);
         uint64 nextPeriodStartTermId = _getPeriodStartTermId(_periodId + 1); // No need for SafeMath: it's actually an uint64
 
         // Pick a random Court term during the next period of the requested one to get the total amount of juror tokens active in the Court
         IClock clock = _clock();
+        // @audit Couldn't you also ensureTermRandomness?
         bytes32 randomness = clock.getTermRandomness(nextPeriodStartTermId);
 
         // The randomness factor for each Court term is computed using the the hash of a block number set during the initialization of the
@@ -764,13 +813,16 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
         // numbers. Therefore, if that occurs we use the hash of the previous block number. This could be slightly beneficial for the first
         // juror calling this function, but it's still impossible to predict during the requested period.
         if (randomness == bytes32(0)) {
+            // @audit If you're already going to use this in the worst case, why not use it always?
             randomness = blockhash(getBlockNumber() - 1);
         }
 
         // Use randomness to choose a Court term of the requested period and query the total amount of juror tokens active at that term
         IJurorsRegistry jurorsRegistry = _jurorsRegistry();
         // No need for SafeMath: terms are represented in uint64
+        // @audit this returns a value inside [periodStarmTermId, periodStartTermId + periodDuration)
         periodBalanceCheckpoint = periodStartTermId + uint64(uint256(randomness) % periodDuration);
+        // @audit `periodBalanceCheckpoint` is really a `term`
         totalActiveBalance = jurorsRegistry.totalActiveBalanceAt(periodBalanceCheckpoint);
     }
 
@@ -787,12 +839,14 @@ contract CourtSubscriptions is ControlledRecoverable, TimeHelpers, ISubscription
     {
         // Fetch juror active balance at the checkpoint used for the requested period
         IJurorsRegistry jurorsRegistry = _jurorsRegistry();
+        // @audit `periodBalanceCheckpoint` is just a court term
         uint256 jurorActiveBalance = jurorsRegistry.activeBalanceOfAt(_juror, _periodBalanceCheckpoint);
         if (jurorActiveBalance == 0) {
             return 0;
         }
 
         // Note that we already checked the juror active balance is greater than zero, then, the total active balance must be greater than zero.
+        // @audit fees[Period] * balance[term] / total
         return _period.collectedFees.mul(jurorActiveBalance) / _totalActiveBalance;
     }
 }

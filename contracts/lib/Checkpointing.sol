@@ -5,7 +5,8 @@ pragma solidity ^0.5.8;
 * @title Checkpointing - Library to handle a historic set of numeric values
 */
 library Checkpointing {
-    uint256 private constant MAX_UINT64 = uint256(uint64(-1));
+    // @audit unused variable
+    // uint256 private constant MAX_UINT64 = uint256(uint64(-1));
     uint256 private constant MAX_UINT192 = uint256(uint192(-1));
 
     string private constant ERROR_VALUE_TOO_BIG = "CHECKPOINT_VALUE_TOO_BIG";
@@ -88,6 +89,7 @@ library Checkpointing {
     * @param _time Point in time to register the given value
     * @param _value Numeric value to be registered at the given point in time
     */
+    // Can probably just inline this
     function _add192(History storage self, uint64 _time, uint192 _value) private {
         uint256 length = self.history.length;
         if (length == 0 || self.history[self.history.length - 1].time < _time) {

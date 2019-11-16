@@ -31,6 +31,7 @@ contract CourtTreasury is ControlledRecoverable, ITreasury {
     * @param _controller Address of the controller
     */
     constructor(Controller _controller) ControlledRecoverable(_controller) public {
+        // @audit The controller can drain the contract!
         // solium-disable-previous-line no-empty-blocks
         // No need to explicitly call `Controlled` constructor since `ControlledRecoverable` is already doing it
     }
@@ -42,6 +43,7 @@ contract CourtTreasury is ControlledRecoverable, ITreasury {
     * @param _amount Amount of tokens to be assigned to the recipient
     */
     function assign(ERC20 _token, address _to, uint256 _amount) external onlyCourt {
+        // @audit court allows user to withdraw $amount
         require(_amount > 0, ERROR_DEPOSIT_AMOUNT_ZERO);
 
         address tokenAddress = address(_token);
@@ -67,8 +69,9 @@ contract CourtTreasury is ControlledRecoverable, ITreasury {
     function withdrawAll(ERC20 _token, address _to) external {
         IConfig config = _config();
         require(config.areWithdrawalsAllowedFor(_to), ERROR_WITHDRAWS_DISALLOWED);
-
         uint256 amount = _balanceOf(_token, _to);
+        // @audit Aragon wants to run a bot as a daemon that gives out users'
+        // funds to their address.
         _withdraw(_token, _to, _to, amount);
     }
 
@@ -96,6 +99,8 @@ contract CourtTreasury is ControlledRecoverable, ITreasury {
 
         address tokenAddress = address(_token);
         // No need for SafeMath: checked above
+        // @audit nit: just use safemath here instead of doing the require
+        // manually, ie remove line above and replace with balance.sub(amount)
         balances[tokenAddress][_from] = balance - _amount;
         emit Withdraw(_token, _from, _to, _amount);
 

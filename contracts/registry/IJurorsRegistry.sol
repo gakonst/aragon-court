@@ -39,12 +39,14 @@ interface IJurorsRegistry {
     * @param _termId Current term id
     * @param _jurors List of juror addresses to be slashed
     * @param _lockedAmounts List of amounts locked for each corresponding juror that will be either slashed or returned
-    * @param _rewardedJurors List of booleans to tell whether a juror's active balance has to be slashed or not
+    * @param _rewardedJurors List of booleans to tell whether a juror's active
+    balance has to be slashed or not
     * @return Total amount of slashed tokens
     */
     function slashOrUnlock(uint64 _termId, address[] calldata _jurors, uint256[] calldata _lockedAmounts, bool[] calldata _rewardedJurors)
         external
         returns (uint256 collectedTokens);
+    // @audit is it actually slashed or both slashed and unlocked?
 
     /**
     * @dev Try to collect a certain amount of tokens from a juror for the next term

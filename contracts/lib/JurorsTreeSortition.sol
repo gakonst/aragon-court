@@ -33,7 +33,7 @@ library JurorsTreeSortition {
         uint256 _disputeId,
         uint64 _termId,
         uint256 _selectedJurors,
-        uint256 _batchRequestedJurors,
+        uint256 _batchRequestedJurors, // what's the difference between the batch & round?
         uint256 _roundRequestedJurors,
         uint256 _sortitionIteration
     )
@@ -53,6 +53,7 @@ library JurorsTreeSortition {
 
         (jurorsIds, jurorsBalances) = tree.search(balances, _termId);
 
+        // DoS if we can construct a tree where balances/_termId returns either jurorIds != batchRequestedJurors
         require(jurorsIds.length == jurorsBalances.length, ERROR_SORTITION_LENGTHS_MISMATCH);
         require(jurorsIds.length == _batchRequestedJurors, ERROR_SORTITION_LENGTHS_MISMATCH);
     }
@@ -77,6 +78,8 @@ library JurorsTreeSortition {
         view
         returns (uint256 low, uint256 high)
     {
+        // Improve the naming of this, make it clear that it's a balance perhaps
+
         uint256 totalActiveBalance = tree.getRecentTotalAt(_termId);
         // No need for SafeMath: the number of round requested jurors is always ensured to be greater than zero in the Court config
         low = _selectedJurors.mul(totalActiveBalance) / _roundRequestedJurors;
@@ -124,6 +127,7 @@ library JurorsTreeSortition {
             // - The disputeId, so 2 disputes in the same term will have different outcomes
             // - The sortition iteration, to avoid getting stuck if resulting jurors are dismissed due to locked balance
             // - The juror number in this batch
+            // @audit OK there is probably no way for the encoded data here to be the same for two different calls?
             bytes32 seed = keccak256(abi.encodePacked(_termRandomness, _disputeId, _sortitionIteration, batchJurorNumber));
 
             // Compute a random active balance to be searched in the jurors tree using the generated seed within the

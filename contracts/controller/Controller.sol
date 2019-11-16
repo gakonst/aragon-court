@@ -9,8 +9,10 @@ import "./config/CourtConfig.sol";
 
 contract Controller is IsContract, CourtClock, CourtConfig {
     string private constant ERROR_SENDER_NOT_GOVERNOR = "CTR_SENDER_NOT_GOVERNOR";
+    // @audit unused varibale
     string private constant ERROR_SENDER_NOT_COURT_MODULE = "CTR_SENDER_NOT_COURT_MODULE";
     string private constant ERROR_INVALID_GOVERNOR_ADDRESS = "CTR_INVALID_GOVERNOR_ADDRESS";
+    // @audit unused nowhere
     string private constant ERROR_ZERO_IMPLEMENTATION_OWNER = "CTR_ZERO_MODULE_OWNER";
     string private constant ERROR_IMPLEMENTATION_NOT_CONTRACT = "CTR_IMPLEMENTATION_NOT_CONTRACT";
     string private constant ERROR_INVALID_IMPLS_INPUT_LENGTH = "CTR_INVALID_IMPLS_INPUT_LENGTH";
@@ -45,6 +47,8 @@ contract Controller is IsContract, CourtClock, CourtConfig {
     Governor private governor;
 
     // List of modules registered for the system indexed by ID
+    // @audit Do you really need these as a mapping? Can't you add this as a
+    // struct of pre-set addresses?
     mapping (bytes32 => address) internal modules;
 
     event ModuleSet(bytes32 id, address addr);
@@ -56,6 +60,7 @@ contract Controller is IsContract, CourtClock, CourtConfig {
     * @dev Ensure the msg.sender is the funds governor
     */
     modifier onlyFundsGovernor {
+        // @audit Maybe make this more explicit about which governor it is?
         require(msg.sender == governor.funds, ERROR_SENDER_NOT_GOVERNOR);
         _;
     }
@@ -148,6 +153,7 @@ contract Controller is IsContract, CourtClock, CourtConfig {
     * @param _appealCollateralParams Array containing params for appeal collateral:
     *        _appealCollateralFactor Multiple of juror fees required to appeal a preliminary ruling
     *        _appealConfirmCollateralFactor Multiple of juror fees required to confirm appeal
+    * @param _minActiveBalance Minimum amount of juror tokens that can be activated
     */
     function setConfig(
         uint64 _fromTermId,
@@ -236,6 +242,8 @@ contract Controller is IsContract, CourtClock, CourtConfig {
     function setModules(bytes32[] calldata _ids, address[] calldata _addresses) external onlyModulesGovernor {
         require(_ids.length == _addresses.length, ERROR_INVALID_IMPLS_INPUT_LENGTH);
 
+        // @audit move this initialization outside to make the MLOAD happen only
+        // once
         for (uint256 i = 0; i < _ids.length; i++) {
             _setModule(_ids[i], _addresses[i]);
         }
@@ -263,7 +271,7 @@ contract Controller is IsContract, CourtClock, CourtConfig {
     *         2. maxRegularAppealRounds Number of regular appeal rounds before the final round is triggered
     *         3. finalRoundLockTerms Number of terms that a coherent juror in a final round is disallowed to withdraw (to prevent 51% attacks)
     * @return appealCollateralParams Array containing params for appeal collateral:
-    *         0. appealCollateralFactor Multiple of juror fees required to appeal a preliminary ruling
+    *         0. appealCollateralFactor Multiple of total fees (juror, draft, settle) required to appeal a preliminary ruling
     *         1. appealConfirmCollateralFactor Multiple of juror fees required to confirm appeal
     */
     function getConfig(uint64 _termId) external view
@@ -443,6 +451,7 @@ contract Controller is IsContract, CourtClock, CourtConfig {
     * @param _currentTermId Identification number of the new current term that has been transitioned
     */
     function _onTermTransitioned(uint64 _currentTermId) internal {
+        // @audit _currentTermId is shadowed
         _ensureTermConfig(_currentTermId);
     }
 

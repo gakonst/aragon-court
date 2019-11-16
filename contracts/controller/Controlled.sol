@@ -40,6 +40,8 @@ contract Controlled is IsContract, ConfigConsumer {
     * @param _controller Address of the controller
     */
     constructor(Controller _controller) public {
+        // @audit-ok Good, they are not using isContract to ensure that the
+        // target is not a contract.
         require(isContract(address(_controller)), ERROR_CONTROLLER_NOT_CONTRACT);
         controller = _controller;
     }
@@ -73,6 +75,7 @@ contract Controlled is IsContract, ConfigConsumer {
     * @return Identification number of the current term
     */
     function _getCurrentTermId() internal view returns (uint64) {
+        // @audit What is the current term id? How does it get calculated?
         return _clock().getCurrentTermId();
     }
 

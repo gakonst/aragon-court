@@ -97,6 +97,7 @@ contract CourtConfig is IConfig, CourtConfigData {
     * @param _allowed Whether or not the automatic withdrawals are allowed by the sender
     */
     function setAutomaticWithdrawals(bool _allowed) external {
+        // @audit OK, user expicitly allows/disallows automatic withdrawls
         withdrawalsAllowed[msg.sender] = _allowed;
         emit AutomaticWithdrawalsAllowedChanged(msg.sender, _allowed);
     }
@@ -172,14 +173,19 @@ contract CourtConfig is IConfig, CourtConfigData {
     )
         internal
     {
+        // @audit OK, matches specification: https://github.com/aragon/aragon-court/blob/fe3b000179806a2a9eb9fe04e39845a93381e706/docs/4-entry-points/1-controller.md, https://github.com/aragon/aragon-court/blob/fe3b000179806a2a9eb9fe04e39845a93381e706/docs/5-data-structures/1-controller.md
+
         // If the current term is not zero, changes must be scheduled at least 2 terms in the future.
         // This way we can ensure that disputes scheduled for the next term won't have their config changed.
+        // @audit OK
         require(_currentTermId == 0 || _fromTermId > _currentTermId + 1, ERROR_TOO_OLD_TERM);
 
         // Make sure appeal collateral factors are greater than zero
+        // @audit OK
         require(_appealCollateralParams[0] > 0 && _appealCollateralParams[1] > 0, ERROR_ZERO_COLLATERAL_FACTOR);
 
         // Make sure the given penalty and final round reduction pcts are not greater than 100%
+        // @audit OK
         require(PctHelpers.isValid(_pcts[0]), ERROR_INVALID_PENALTY_PCT);
         require(PctHelpers.isValid(_pcts[1]), ERROR_INVALID_FINAL_ROUND_REDUCTION_PCT);
 
@@ -204,6 +210,7 @@ contract CourtConfig is IConfig, CourtConfigData {
 
         // If there was a config change already scheduled, reset it (in that case we will overwrite last array item).
         // Otherwise, schedule a new config.
+        // @audit are we sure that's good?
         if (configChangeTermId > _currentTermId) {
             configIdByTerm[configChangeTermId] = 0;
         } else {
@@ -222,6 +229,7 @@ contract CourtConfig is IConfig, CourtConfigData {
         });
 
         config.disputes = DisputesConfig({
+            // @audit rename Terms to "duration" ie commitPhaseDuration
             commitTerms: _roundStateDurations[0],
             revealTerms: _roundStateDurations[1],
             appealTerms: _roundStateDurations[2],
@@ -229,7 +237,9 @@ contract CourtConfig is IConfig, CourtConfigData {
             penaltyPct: _pcts[0],
             firstRoundJurorsNumber: _roundParams[0],
             appealStepFactor: _roundParams[1],
+            // @audit how many rounds until the final round
             maxRegularAppealRounds: _maxRegularAppealRounds,
+            // duration of final round
             finalRoundLockTerms: _roundParams[3],
             appealCollateralFactor: _appealCollateralParams[0],
             appealConfirmCollateralFactor: _appealCollateralParams[1]

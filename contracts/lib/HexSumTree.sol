@@ -37,7 +37,7 @@ library HexSumTree {
 
     // Constants used to perform tree computations
     // To change any the following constants, the following relationship must be kept: 2^BITS_IN_NIBBLE = CHILDREN
-    // The max depth of the tree will be given by: BITS_IN_NIBBLE * MAX_DEPTH = 256 (so in this case it's 64)
+    // The max depth of the tree will be given by: BITS_IN_NIBBLE * MAX_DEPTH = 256 (so in this case it's 63)
     uint256 private constant CHILDREN = 16;
     uint256 private constant BITS_IN_NIBBLE = 4;
 
@@ -70,7 +70,7 @@ library HexSumTree {
     *      - level: Level being analyzed for the search, it starts at the level under the root and decrements till the leaves
     *      - parentKey: Key of the parent of the nodes being analyzed at the given level for the search
     *      - foundValues: Number of values in the list being searched that were already found, it will go from 0 until the size of the list
-    *      - visitedTotal: Total sum of values that were already visited during the search, it will fo from 0 until the tree total
+    *      - visitedTotal: Total sum of values that were already visited during the search, it will go from 0 until the tree total
     */
     struct SearchParams {
         uint64 time;
@@ -303,6 +303,11 @@ library HexSumTree {
             // No need for SafeMath: for addition, overflow it's checked at the end of the update for the root,
             // while for subtraction it was checked previously by `set` and `update` functions.
             uint256 lastValue = getNode(self, level, ancestorKey);
+            if (_positive) { // Audit: ensure that there is no underflow which can ever happen
+                assert(lastValue + _delta > lastValue); // Ensure no overflow
+            } else {
+                assert(lastValue > _delta);
+            }
             uint256 newValue = _positive ? lastValue + _delta : lastValue - _delta;
             _add(self, level, ancestorKey, _time, newValue);
         }

@@ -42,6 +42,11 @@ contract JurorsRegistry is ControlledRecoverable, IJurorsRegistry, ERC900, Appro
     address internal constant BURN_ACCOUNT = address(0x000000000000000000000000000000000000dEaD);
 
     // Maximum number of sortition iterations allowed per draft call
+    // low number of jurors and some are already drafted
+    // i need to pay each juror 
+    // how do you boostrap jurors?
+    // Kleros jurors maybe
+    // some airdrop to ant holders
     uint256 internal constant MAX_DRAFT_ITERATIONS = 10;
 
     /**
@@ -53,15 +58,16 @@ contract JurorsRegistry is ControlledRecoverable, IJurorsRegistry, ERC900, Appro
     *      Due to a gas optimization for drafting, the "active" tokens are stored in a `HexSumTree`, while the others
     *      are stored in this contract as `lockedBalance` and `availableBalance` respectively. Given that the jurors'
     *      active balances cannot be affected during the current Court term, if jurors want to deactivate some of their
-    *      active tokens, their balance will be updated for the following term, and they won't be allowed to
-    *      withdraw them until the current term has ended.
-    *
+    *      active tokens, their balance will be updated for the following term,
+    and they won't be allowed to
     *      Note that even though jurors balances are stored separately, all the balances are held by this contract.
     */
     struct Juror {
+    // @audit ACTIVE BALANCES MUST NOT BE AFFECTED DURING THE CURRENT COUTER TERM
+    // withdraw them until the current term has ended.
         uint256 id;                                 // Key in the jurors tree used for drafting
         uint256 lockedBalance;                      // Maximum amount of tokens that can be slashed based on the juror's drafts
-        uint256 availableBalance;                   // Available tokens that can be withdrawn at any time
+        uint256 availableBalance;                   // Available tokens that canbe withdrawn at any time
         uint64 withdrawalsLockTermId;               // Term ID until which the juror's withdrawals will be locked
         DeactivationRequest deactivationRequest;    // Juror's pending deactivation request
     }
@@ -91,7 +97,7 @@ contract JurorsRegistry is ControlledRecoverable, IJurorsRegistry, ERC900, Appro
         uint256 iteration;                          // Sortition iteration number
     }
 
-    // Maximum amount of total active balance that can be hold in the registry
+    // Maximum amount of total active balance that can be held in the registry
     uint256 internal totalActiveBalanceLimit;
 
     // Juror ERC20 token
@@ -119,7 +125,7 @@ contract JurorsRegistry is ControlledRecoverable, IJurorsRegistry, ERC900, Appro
     * @dev Constructor function
     * @param _controller Address of the controller
     * @param _jurorToken Address of the ERC20 token to be used as juror token for the registry
-    * @param _totalActiveBalanceLimit Maximum amount of total active balance that can be hold in the registry
+    * @param _totalActiveBalanceLimit Maximum amount of total active balance that can be held in the registry
     */
     constructor(Controller _controller, ERC20 _jurorToken, uint256 _totalActiveBalanceLimit)
         ControlledRecoverable(_controller)
@@ -147,6 +153,7 @@ contract JurorsRegistry is ControlledRecoverable, IJurorsRegistry, ERC900, Appro
         _processDeactivationRequest(msg.sender, termId);
 
         uint256 availableBalance = jurorsByAddress[msg.sender].availableBalance;
+        // @audit Could this be called by accident with 0? Pretty bad
         uint256 amountToActivate = _amount == 0 ? availableBalance : _amount;
         require(amountToActivate > 0, ERROR_INVALID_ZERO_AMOUNT);
         require(amountToActivate <= availableBalance, ERROR_INVALID_ACTIVATION_AMOUNT);
@@ -161,6 +168,7 @@ contract JurorsRegistry is ControlledRecoverable, IJurorsRegistry, ERC900, Appro
     function deactivate(uint256 _amount) external {
         uint64 termId = _ensureCurrentTerm();
         Juror storage juror = jurorsByAddress[msg.sender];
+        // @audit it checks internally if the juror exists
         uint256 unlockedActiveBalance = _lastUnlockedActiveBalanceOf(juror);
         uint256 amountToDeactivate = _amount == 0 ? unlockedActiveBalance : _amount;
         require(amountToDeactivate > 0, ERROR_INVALID_ZERO_AMOUNT);
@@ -171,6 +179,9 @@ contract JurorsRegistry is ControlledRecoverable, IJurorsRegistry, ERC900, Appro
         uint256 minActiveBalance = _getMinActiveBalance(termId);
         require(futureActiveBalance == 0 || futureActiveBalance >= minActiveBalance, ERROR_INVALID_DEACTIVATION_AMOUNT);
 
+        // create a deact request for that juror
+        // jurors[msg.sender].deactivationRequest = { += amount, term+1}
+        // and decrease juror balance in tree
         _createDeactivationRequest(msg.sender, amountToDeactivate);
     }
 
@@ -255,6 +266,7 @@ contract JurorsRegistry is ControlledRecoverable, IJurorsRegistry, ERC900, Appro
     * @return length Size of the list of the draft result
     */
     function draft(uint256[7] calldata _params) external onlyCourt returns (address[] memory jurors, uint256 length) {
+        // we need to get that many jurors
         uint256 batchRequestedJurors = _params[4];
         jurors = new address[](batchRequestedJurors);
         DraftParams memory draftParams = _buildDraftParams(_params);
@@ -275,21 +287,28 @@ contract JurorsRegistry is ControlledRecoverable, IJurorsRegistry, ERC900, Appro
         onlyCourt
         returns (uint256)
     {
+        // @audit The 3 arrays MUST be aligned properly, ie the ith juror MUST correspond
+        // to the ith lockedAmount, to the ith rewarded flag
         require(_jurors.length == _lockedAmounts.length, ERROR_INVALID_LOCKED_AMOUNTS_LENGTH);
         require(_jurors.length == _rewardedJurors.length, ERROR_INVALID_REWARDED_JURORS_LENGTH);
 
+        // @audit the slashing is taken into effect in the next term. Does this mean that a slashed juror
+        // can withdraw their funds before the slashing on the active actually occurs?
         uint64 nextTermId = _termId + 1;
-        uint256 collectedTokens;
 
+        uint256 collectedTokens;
         for (uint256 i = 0; i < _jurors.length; i++) {
             uint256 lockedAmount = _lockedAmounts[i];
             Juror storage juror = jurorsByAddress[_jurors[i]];
+            // @audit this unlocks the requested amount and allows it to be withdrawn from the tree
             juror.lockedBalance = juror.lockedBalance.sub(lockedAmount);
 
             // Slash juror if requested. Note that there's no need to check if there was a deactivation
             // request since we're working with already locked balances.
             if (!_rewardedJurors[i]) {
                 collectedTokens = collectedTokens.add(lockedAmount);
+                // @audit this ensures that if you should get slashed, after unlocking the 
+                // amount it should also gets subtracted from the tree
                 tree.update(juror.id, nextTermId, lockedAmount, false);
             }
         }
@@ -307,13 +326,16 @@ contract JurorsRegistry is ControlledRecoverable, IJurorsRegistry, ERC900, Appro
     * @return True if the juror has enough unlocked tokens to be collected for the requested term, false otherwise
     */
     function collectTokens(address _juror, uint256 _amount, uint64 _termId) external onlyCourt returns (bool) {
+        // @audit Do nothing if 0 is provided, this will not interfere with the court setting the juror's tokens
         if (_amount == 0) {
             return true;
         }
 
         uint64 nextTermId = _termId + 1;
         Juror storage juror = jurorsByAddress[_juror];
+        // fetches the balance from the tree
         uint256 unlockedActiveBalance = _lastUnlockedActiveBalanceOf(juror);
+        // fetches how much must be decreased in the next term
         uint256 nextTermDeactivationRequestAmount = _deactivationRequestedAmountForTerm(juror, nextTermId);
 
         // Check if the juror has enough unlocked tokens to collect the requested amount
@@ -346,6 +368,7 @@ contract JurorsRegistry is ControlledRecoverable, IJurorsRegistry, ERC900, Appro
     * @param _termId Term ID until which the juror's withdrawals will be locked
     */
     function lockWithdrawals(address _juror, uint64 _termId) external onlyCourt {
+    // @audit rename to lockWithdrawalsUntil
         Juror storage juror = jurorsByAddress[_juror];
         juror.withdrawalsLockTermId = _termId;
     }
@@ -355,6 +378,7 @@ contract JurorsRegistry is ControlledRecoverable, IJurorsRegistry, ERC900, Appro
     * @param _totalActiveBalanceLimit New limit of total active balance of juror tokens
     */
     function setTotalActiveBalanceLimit(uint256 _totalActiveBalanceLimit) external onlyConfigGovernor {
+        // @audit OK, can only be called by configCovernor
         _setTotalActiveBalanceLimit(_totalActiveBalanceLimit);
     }
 
@@ -363,6 +387,7 @@ contract JurorsRegistry is ControlledRecoverable, IJurorsRegistry, ERC900, Appro
     * @return Address of the token used for staking
     */
     function token() external view returns (address) {
+        // @audit OK, simple getter for token
         return address(jurorsToken);
     }
 
@@ -371,6 +396,7 @@ contract JurorsRegistry is ControlledRecoverable, IJurorsRegistry, ERC900, Appro
     * @return Amount of juror tokens held by the registry contract
     */
     function totalStaked() external view returns (uint256) {
+        // @audit OK, simple balance getter for this contract, indicating how much has been staked
         return jurorsToken.balanceOf(address(this));
     }
 
@@ -379,6 +405,7 @@ contract JurorsRegistry is ControlledRecoverable, IJurorsRegistry, ERC900, Appro
     * @return Total amount of active juror tokens
     */
     function totalActiveBalance() external view returns (uint256) {
+        // @audit Assuming `tree.getTotal()` tracks active juror tokens properly, this will fetch the amount of active juror tokens
         return tree.getTotal();
     }
 
@@ -497,6 +524,8 @@ contract JurorsRegistry is ControlledRecoverable, IJurorsRegistry, ERC900, Appro
     * @param _amount Amount of juror tokens to be activated
     */
     function _activateTokens(address _juror, uint64 _termId, uint256 _amount) internal {
+
+        // @audit move deactivation request 
         uint64 nextTermId = _termId + 1;
         _checkTotalActiveBalance(nextTermId, _amount);
         Juror storage juror = jurorsByAddress[_juror];
@@ -526,13 +555,14 @@ contract JurorsRegistry is ControlledRecoverable, IJurorsRegistry, ERC900, Appro
     */
     function _createDeactivationRequest(address _juror, uint256 _amount) internal {
         uint64 termId = _ensureCurrentTerm();
-
+        // @audit Check what bad things can happen if I try to deposit instead of staking
         // Try to clean a previous deactivation request if possible
         _processDeactivationRequest(_juror, termId);
 
         uint64 nextTermId = termId + 1;
         Juror storage juror = jurorsByAddress[_juror];
         DeactivationRequest storage request = juror.deactivationRequest;
+        // @audit when a deact request is made, it is set to the next term
         request.amount = request.amount.add(_amount);
         request.availableTermId = nextTermId;
         tree.update(juror.id, nextTermId, _amount, false);
@@ -615,7 +645,12 @@ contract JurorsRegistry is ControlledRecoverable, IJurorsRegistry, ERC900, Appro
     * @param _amount Amount of tokens to be deposited (and optionally activated)
     * @param _data Optional data that can be used to request the activation of the deposited tokens
     */
-    function _deposit(address _from, address _juror, uint256 _amount, bytes memory _data) internal {
+    function _deposit(address _from, address _juror, uint256 _amount, bytes
+    memory _data) internal {
+        // @audit Should the deposit also clean the deactivation request if any?
+        // Try to clean a previous deactivation request if any
+        // _processDeactivationRequest(msg.sender, termId);
+
         require(_amount > 0, ERROR_INVALID_ZERO_AMOUNT);
         _updateAvailableBalanceOf(_juror, _amount, true);
 
@@ -637,6 +672,7 @@ contract JurorsRegistry is ControlledRecoverable, IJurorsRegistry, ERC900, Appro
     function _withdraw(address _juror, uint256 _amount) internal {
         require(_amount > 0, ERROR_INVALID_ZERO_AMOUNT);
 
+        // @audit no idea what this logic means
         // Try to process a deactivation request for the current term if there is one. Note that we don't need to ensure
         // the current term this time since deactivation requests always work with future terms, which means that if
         // the current term is outdated, it will never match the deactivation term id. We avoid ensuring the term here
@@ -647,6 +683,7 @@ contract JurorsRegistry is ControlledRecoverable, IJurorsRegistry, ERC900, Appro
         uint64 withdrawalsLockTermId = jurorsByAddress[_juror].withdrawalsLockTermId;
         require(withdrawalsLockTermId == 0 || withdrawalsLockTermId < lastEnsuredTermId, ERROR_WITHDRAWALS_LOCK);
 
+        // no need to check the id bc request.DeactiovationTerm is always +1 of the current term id
         _processDeactivationRequest(_juror, lastEnsuredTermId);
 
         _updateAvailableBalanceOf(_juror, _amount, false);
@@ -671,6 +708,7 @@ contract JurorsRegistry is ControlledRecoverable, IJurorsRegistry, ERC900, Appro
         if (_positive) {
             juror.availableBalance = juror.availableBalance.add(_amount);
         } else {
+            // @audit why use safemath in the happy case and not in this case? confusing
             require(_amount <= juror.availableBalance, ERROR_NOT_ENOUGH_AVAILABLE_BALANCE);
             // No need for SafeMath: we already checked values right above
             juror.availableBalance -= _amount;
@@ -684,9 +722,8 @@ contract JurorsRegistry is ControlledRecoverable, IJurorsRegistry, ERC900, Appro
     * @param _jurors List of unique jurors selected for the draft
     * @return Number of unique jurors selected for the draft. Note that this value may differ from the number of requested jurors
     */
-    function _draft(DraftParams memory _params, address[] memory _jurors) internal returns (uint256) {
+    function _draft(DraftParams memory _params, address[] memory _jurors) internal returns (uint256 length) {
         uint256 length = 0;
-
         // Jurors returned by the tree multi-sortition may not have enough unlocked active balance to be drafted. Thus,
         // we compute several sortitions until all the requested jurors are selected. To guarantee a different set of
         // jurors on each sortition, the iteration number will be part of the random seed to be used in the sortition.
@@ -727,7 +764,6 @@ contract JurorsRegistry is ControlledRecoverable, IJurorsRegistry, ERC900, Appro
                 }
             }
         }
-
         return length;
     }
 
@@ -735,6 +771,7 @@ contract JurorsRegistry is ControlledRecoverable, IJurorsRegistry, ERC900, Appro
     * @dev Internal function to set new limit of total active balance of juror tokens
     * @param _totalActiveBalanceLimit New limit of total active balance of juror tokens
     */
+    // @audit OK, can set values properly
     function _setTotalActiveBalanceLimit(uint256 _totalActiveBalanceLimit) internal {
         require(_totalActiveBalanceLimit > 0, ERROR_BAD_TOTAL_ACTIVE_BALANCE_LIMIT);
         emit TotalActiveBalanceLimitChanged(totalActiveBalanceLimit, _totalActiveBalanceLimit);
@@ -774,6 +811,7 @@ contract JurorsRegistry is ControlledRecoverable, IJurorsRegistry, ERC900, Appro
     */
     function _activeBalanceOfAt(address _juror, uint64 _termId) internal view returns (uint256) {
         Juror storage juror = jurorsByAddress[_juror];
+        // @audit move all these repetitive existJuror call inside the treem aybe?
         return _existsJuror(juror) ? tree.getItemAt(juror.id, _termId) : 0;
     }
 
@@ -784,6 +822,8 @@ contract JurorsRegistry is ControlledRecoverable, IJurorsRegistry, ERC900, Appro
     * @return Amount of active tokens of a juror that are not locked due to ongoing disputes
     */
     function _lastUnlockedActiveBalanceOf(Juror storage _juror) internal view returns (uint256) {
+    // @audit How does time affect this system? How does our active balance in a
+    // future term affect the system?
         return _existsJuror(_juror) ? tree.getItem(_juror.id).sub(_juror.lockedBalance) : 0;
     }
 
@@ -794,6 +834,7 @@ contract JurorsRegistry is ControlledRecoverable, IJurorsRegistry, ERC900, Appro
     */
     function _currentUnlockedActiveBalanceOf(Juror storage _juror) internal view returns (uint256) {
         uint64 lastEnsuredTermId = _getLastEnsuredTermId();
+        // @audit I'd prefer calling this jurorExists
         return _existsJuror(_juror) ? tree.getItemAt(_juror.id, lastEnsuredTermId).sub(_juror.lockedBalance) : 0;
     }
 
@@ -813,6 +854,7 @@ contract JurorsRegistry is ControlledRecoverable, IJurorsRegistry, ERC900, Appro
     * @return Amount of the deactivation request for the given term, 0 otherwise
     */
     function _deactivationRequestedAmountForTerm(Juror storage _juror, uint64 _termId) internal view returns (uint256) {
+    // @audit when will request.availableTermId be not equal ot that?
         DeactivationRequest storage request = _juror.deactivationRequest;
         return request.availableTermId == _termId ? request.amount : 0;
     }
@@ -823,10 +865,11 @@ contract JurorsRegistry is ControlledRecoverable, IJurorsRegistry, ERC900, Appro
     * @return Total amount of active juror tokens at the given term id
     */
     function _totalActiveBalanceAt(uint64 _termId) internal view returns (uint256) {
+        // @audit gets the active balance via the tree,
         // This function will return always the same values, the only difference remains on gas costs. In case we look for a
         // recent term, in this case current or future ones, we perform a backwards linear search from the last checkpoint.
         // Otherwise, a binary search is computed.
-        bool recent = _termId >= _getLastEnsuredTermId();
+        bool recent = _termId >= _getLastEnsuredTermId(); // @audit calls Controlled.clock --> which asks the controller which is the clock which retunrs the last termId
         return recent ? tree.getRecentTotalAt(_termId) : tree.getTotalAt(_termId);
     }
 
@@ -835,6 +878,8 @@ contract JurorsRegistry is ControlledRecoverable, IJurorsRegistry, ERC900, Appro
     * @param _termId Term ID when the new amount will be added
     * @param _amount Amount of tokens willing to be added to the registry
     */
+    // @audit ok, ensures that balance at termId + amount is less than the
+    // limwill this be ever hit?
     function _checkTotalActiveBalance(uint64 _termId, uint256 _amount) internal view {
         uint256 currentTotalActiveBalance = _totalActiveBalanceAt(_termId);
         uint256 newTotalActiveBalance = currentTotalActiveBalance.add(_amount);
@@ -850,6 +895,7 @@ contract JurorsRegistry is ControlledRecoverable, IJurorsRegistry, ERC900, Appro
     */
     function _getBalances(Juror storage _juror) internal view returns (uint256 available, uint256 locked, uint256 pendingDeactivation) {
         available = _juror.availableBalance;
+        // @audit ok, simple getter
         locked = _juror.lockedBalance;
         pendingDeactivation = _juror.deactivationRequest.amount;
     }
@@ -860,7 +906,10 @@ contract JurorsRegistry is ControlledRecoverable, IJurorsRegistry, ERC900, Appro
     * @return ids List of juror ids obtained based on the requested search
     * @return activeBalances List of active balances for each juror obtained based on the requested search
     */
-    function _treeSearch(DraftParams memory _params) internal view returns (uint256[] memory ids, uint256[] memory activeBalances) {
+    function _treeSearch(DraftParams memory _params) internal view returns
+    (uint256[] memory ids, uint256[] memory activeBalances) {
+        // @audit This is `internal` so that it can be mocked. Consider making
+        // private
         (ids, activeBalances) = tree.batchedRandomSearch(
             _params.termRandomness,
             _params.disputeId,
@@ -885,7 +934,9 @@ contract JurorsRegistry is ControlledRecoverable, IJurorsRegistry, ERC900, Appro
     *
     * @return Draft params object parsed
     */
-    function _buildDraftParams(uint256[7] memory _params) private view returns (DraftParams memory) {
+    function _buildDraftParams(uint256[7] memory _params) private view returns
+    (DraftParams memory) {
+        // @audit This is only called once, consider inlining
         uint64 termId = uint64(_params[2]);
         uint256 minActiveBalance = _getMinActiveBalance(termId);
 

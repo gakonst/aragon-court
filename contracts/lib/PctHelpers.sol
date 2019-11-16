@@ -13,6 +13,7 @@ library PctHelpers {
     }
 
     function pct(uint256 self, uint16 _pct) internal pure returns (uint256) {
+        // @audit This becomes 0 if self * pct < 10k
         return self.mul(uint256(_pct)) / PCT_BASE;
     }
 
